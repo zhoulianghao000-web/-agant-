@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { MODULES, isModuleEnabled } from './moduleRegistry';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useAppStore } from '@/store/appStore';
+import { BRAND } from '@/shared/config/brand';
 
 /**
  * App Shell（对应架构设计 v1.1 · B5.2）
@@ -31,7 +32,12 @@ export function AppShell(): React.ReactNode {
       >
         <div className="border-border flex h-12 items-center gap-2 border-b px-3">
           <span className="bg-brand h-5 w-5 shrink-0 rounded-md" aria-hidden />
-          {!sidebarCollapsed && <span className="text-content-primary text-sm font-semibold">AIGC</span>}
+          {/* 折叠时只显示色块，不显示被截断的残缺品牌词（DesignToken §1.4） */}
+          {!sidebarCollapsed && (
+            <span className="text-content-primary whitespace-nowrap text-sm font-semibold" data-testid="brand-name">
+              {BRAND.name}
+            </span>
+          )}
           <button
             type="button"
             onClick={toggleSidebar}
