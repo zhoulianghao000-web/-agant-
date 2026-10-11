@@ -5,18 +5,11 @@
  * 只有这样，SSE 的「按类型精确失效」才有可维护的落脚点 —— 见 sse.ts 的失效映射表。
  */
 
-export interface AssetFilters {
-  projectId?: number;
-  type?: string;
-  visibility?: string;
-  unreferenced?: boolean;
-  cursor?: string;
-}
+// 过滤条件的形状统一来自 api.ts（其字段又来自契约生成物）。
+// 这里曾经重复定义过一份 —— 那等于又造了一个会漂移的副本。
+import type { AssetFilters, JobFilters } from '@/shared/types/api';
 
-export interface JobFilters {
-  status: string;
-  cursor?: string;
-}
+export type { AssetFilters, JobFilters };
 
 export const qk = {
   // ---- 会话与目录 ----

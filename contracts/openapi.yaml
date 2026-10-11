@@ -1,0 +1,1141 @@
+openapi: 3.1.0
+
+info:
+  title: 三合一 AIGC 创作平台 · BFF 接口契约
+  version: 1.0.0
+  description: |
+    归属：`三合一实施计划-v1.2.md` → 阶段 0 → 任务 0.5（接口契约冻结）
+    状态：**待评审**。评审通过后冻结，任何变更走 CR（≤3 人日由 PO 裁决，超过需范围置换）。
+
+    ## 设计约定
+    1. **单一真源**：领域数据只有一份，客户端走 TanStack Query 缓存，不做本地副本。
+    2. **任务为异步对象**：`POST /v1/jobs` 只负责受理（P95 < 300ms），进度与结果通过 SSE 推送。
+    3. **积分预扣在受理时发生**：余额不足直接 402，不进队列（限流发生在业务层，规则可解释）。
+    4. **一键同款是纯客户端流程**：读 `asset.genSnapshot` 填充创作表单；`snapshotHash` 用于判定
+       「是否改过参数」——未改动则直接复用原产物（零等待零积分），改动则提交新 job 并提示结果差异。
+    5. **审核只透传**：平台不自行判定内容安全，`Asset.reviewStatus` 与 `job.errorCode` 直接来自 Provider。
+    6. **删除语义**：所有删除为软删除；被引用的资产返回 409，不允许硬删（保证一键同款链路不残缺）。
+
+    ## 错误码总表
+    | HTTP | code | 触发条件 | 客户端应对 |
+    |---|---|---|---|
+    | 400 | `INVALID_ARGUMENT` | 参数校验失败 | 展示字段级错误 |
+    | 401 | `UNAUTHENTICATED` | 未登录 / token 失效 | 引导登录 |
+    | 402 | `INSUFFICIENT_CREDIT` | 余额不足以预扣 | 引导充值，保留表单 |
+    | 403 | `FORBIDDEN` | 无该工作空间权限 | 提示无权限 |
+    | 404 | `NOT_FOUND` | 资源不存在或已软删 | 回退列表 |
+    | 409 | `ASSET_REFERENCED` | 资产被项目/画布引用，拒绝删除 | 提示先解除引用 |
+    | 409 | `DUPLICATE_IDEMPOTENCY_KEY` | 幂等键冲突且载荷不同 | 提示重复提交 |
+    | 422 | `CONTENT_BLOCKED_BY_PROVIDER` | 同步阶段即被 Provider 拦截 | 提示改写，不扣积分 |
+    | 429 | `RATE_LIMITED` | 超出频率配额 | 显示重试倒计时 |
+    | 502 | `PROVIDER_ERROR` | Provider 返回异常 | 可重试，已预扣将返还 |
+    | 503 | `PROVIDER_UNAVAILABLE` | Provider 不可用 / 限流 | 排队或切主备 |
+    | 504 | `PROVIDER_TIMEOUT` | Provider 超时 | 全额返还，可重试 |
+    | 413 | `UPLOAD_TOO_LARGE` | 单文件超过 10GB | 提示压缩或分段 |
+    | 409 | `UPLOAD_INCOMPLETE` | 分片不完整 / ETag 不匹配 | 仅重传缺失分片 |
+    | 409 | `APPEAL_CONFLICT` | 资产未处于 blocked，或已有处理中的申诉 | 显示申诉状态，不重复提交 |
+
+    ## 范围假设（评审补充）
+
+    - **Workspace 不单独暴露资源端点**：P0 为单人单空间，工作空间由登录态隐式确定，
+      客户端无需传 `workspaceId`。P3 引入团队空间时再新增 `/v1/workspaces` 与成员端点
+      （数据模型已预留 `workspace` 表，无需迁移）。
+    - **画布**：`POST/GET/PUT /v1/canvases*` 端点先冻结，功能本体属 P1。先冻契约的
+      理由是画布数据是「整体替换」语义，接口形态一旦被前端按增量同步实现就很难改回。
+    - **上传**：属 P0 必需（图生视频的参考图入口），不是可选能力。
+
+    异步阶段失败（写入 `job.errorCode`，走 SSE）：`USER_CANCELLED` / `PROVIDER_TIMEOUT` /
+    `PROVIDER_ERROR` / `CONTENT_BLOCKED_BY_PROVIDER` / `CREDIT_SETTLE_FAILED`。
+
+servers:
+  - url: https://api.example.com
+    description: 生产
+  - url: https://staging-api.example.com
+    description: 预发
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Jobs
+    description: 生成任务（受理、查询、取消）
+  - name: Events
+    description: SSE 事件流（任务进度与结果）
+  - name: Uploads
+    description: 分片上传（评审补充 F1：P0 图生视频的参考图入口）
+  - name: Assets
+    description: 资产（含公开开关、审核透传与误拦申诉）
+  - name: Projects
+    description: 项目与多对多引用
+  - name: Canvases
+    description: 无限画布（引用式白板）
+  - name: Discover
+    description: 广场（只读消费版，仅自产 + 已公开 + 审核通过）
+  - name: Credits
+    description: 积分账户与账本
+  - name: Catalog
+    description: 模型与技能注册表
+
+paths:
+
+  # ==================== Jobs ====================
+  /v1/jobs:
+    post:
+      tags: [Jobs]
+      summary: 提交生成任务
+      description: |
+        受理即预扣积分（按 `costProfile` 取估额上限）。余额不足返回 402，任务不入队。
+        必须携带 `Idempotency-Key`：重复提交不会重复扣费。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobCreateRequest' }
+      responses:
+        '202':
+          description: 已受理并进入队列
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job]
+                properties:
+                  job: { $ref: '#/components/schemas/Job' }
+                  preDeducted: { type: integer, description: 本次预扣积分 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '402': { $ref: '#/components/responses/InsufficientCredit' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/ProviderUnavailable' }
+    get:
+      tags: [Jobs]
+      summary: 任务列表（任务中心）
+      description: 任务实体不进入前端全局 store，仅计数进入；列表走本接口 + SSE 精确失效。
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, succeeded, failed, blocked, cancelled, active]
+            default: active
+          description: active = queued + running
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Job' }
+                  nextCursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /v1/jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      summary: 任务详情（SSE 不可用时的轮询兜底）
+      description: 客户端在 SSE 断开时以 3s 间隔调用本接口对齐状态。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: 任务详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/jobs/{jobId}/cancel:
+    post:
+      tags: [Jobs]
+      summary: 取消任务
+      description: 排队中直接取消；生成中触发取消信号。两种情形均**全额返还预扣积分**。
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: 取消已受理
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 任务已处于终态，无法取消
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ==================== Events (SSE) ====================
+  /v1/events/stream:
+    get:
+      tags: [Events]
+      summary: SSE 事件流（全站单连接复用）
+      description: |
+        **全站只维持一条连接**，挂在 App Shell 的任务中心上，客户端按 `taskId` 订阅过滤后分发。
+        绝不做「一个任务一条流」（HTTP/2 下单域名连接数有限，多任务会饿死其余请求）。
+
+        ### 断线续传
+        服务端为每条事件分配单调递增的 `id`（= `job_event.event_id`）。
+        客户端重连时携带 `Last-Event-ID`，服务端只补发 `event_id > Last-Event-ID` 的事件，
+        不重放全量 → 保证「无重复、无丢失」。
+
+        ### 降级
+        连接失败 / 企业代理拦截 / 移动端后台休眠 → 回退到 `GET /v1/jobs?status=active` 3s 轮询。
+        `visibilitychange` 为 hidden 时客户端应主动断开，恢复可见后带 `Last-Event-ID` 重连。
+
+        ### 事件类型
+        `queued` `running` `progress` `succeeded` `failed` `blocked`
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          schema: { type: integer }
+          description: 上次收到的最大 eventId，仅补发其之后的事件
+        - name: lastEventId
+          in: query
+          required: false
+          schema: { type: integer }
+          description: |
+            **与 `Last-Event-ID` 头语义完全等价，两者取「较大值」为准。**
+
+            为什么必须同时支持查询参数：浏览器的 `EventSource` API **不允许自定义请求头**，
+            因此前端无法在重连时发送 `Last-Event-ID` 头，只能把它放进 URL。
+            若服务端仅按契约实现 header 一种形式，断线续传会**静默失效** ——
+            表现为「断网恢复后进度条不动」，且不报错，极难定位。
+        - name: jobIds
+          in: query
+          schema: { type: string }
+          description: 可选，逗号分隔的任务订阅过滤；不传则推送本工作空间全部事件
+      responses:
+        '200':
+          description: |
+            `text/event-stream` 流。每个事件形如：
+            ```
+            id: 128
+            event: progress
+            data: {"taskId":"123","progress":60}
+            ```
+            每 15s 发送一次 `:heartbeat` 注释行保活。
+          headers:
+            X-Accel-Buffering:
+              schema: { type: string, const: 'no' }
+              description: 必须关闭反向代理缓冲，否则进度条会「卡住」
+            Cache-Control:
+              schema: { type: string, const: 'no-cache' }
+          content:
+            text/event-stream:
+              schema: { type: string }
+              examples:
+                progress:
+                  value: "id: 128\nevent: progress\ndata: {\"taskId\":\"123\",\"progress\":60}\n\n"
+                succeeded:
+                  value: "id: 129\nevent: succeeded\ndata: {\"taskId\":\"123\",\"assetId\":\"9001\",\"settled\":20}\n\n"
+                blocked:
+                  value: "id: 130\nevent: blocked\ndata: {\"taskId\":\"123\",\"reason\":\"CONTENT_BLOCKED_BY_PROVIDER\",\"refunded\":20}\n\n"
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  # ==================== Uploads ====================
+  # 【评审补充 F1】原契约缺上传能力 —— 这是 P0 闭环的硬阻塞：
+  #   P0 承诺「图片 → 视频」链路（B6.2），用户必须能把参考图传进来才能发起 img2video。
+  #   缺了这个端点，P0 的垂直闭环在第二步就断了。
+  /v1/uploads:
+    post:
+      tags: [Uploads]
+      summary: 创建分片上传会话
+      description: |
+        两段式：先创建会话拿预签名地址，再分片直传对象存储，最后 complete 落库为资产。
+        为什么不让文件过 BFF：大文件过服务端会占满带宽与内存，且断点续传要在
+        存储层做才可靠。BFF 只负责签发与登记。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename, sizeBytes, contentType]
+              properties:
+                filename: { type: string, maxLength: 255 }
+                sizeBytes:
+                  type: integer
+                  description: 单文件上限 10GB（与性能指标一致）
+                contentType: { type: string, description: '如 image/png、video/mp4' }
+                purpose:
+                  type: string
+                  enum: [reference, subject]
+                  default: reference
+                  description: reference=创作参考素材；subject=主体库（P1）
+      responses:
+        '201':
+          description: 会话已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '413':
+          description: 超出单文件大小上限
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/uploads/{uploadId}/complete:
+    post:
+      tags: [Uploads]
+      summary: 完成上传并落库为资产
+      description: |
+        校验分片完整性后把对象登记为 `Asset`（`type` 由 `contentType` 推断），
+        并使上传会话进入 `completed`。**幂等**：重复调用返回同一个 `assetId`。
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parts]
+              properties:
+                parts:
+                  type: array
+                  description: 已上传分片的 ETag 清单，服务端据此校验完整性
+                  items:
+                    type: object
+                    required: [partNumber, etag]
+                    properties:
+                      partNumber: { type: integer, minimum: 1 }
+                      etag: { type: string }
+      responses:
+        '200':
+          description: 已落库为资产
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset]
+                properties:
+                  asset: { $ref: '#/components/schemas/Asset' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 分片不完整或 ETag 不匹配，需重新上传缺失分片
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ==================== Assets ====================
+  /v1/assets:
+    get:
+      tags: [Assets]
+      summary: 资产列表（M2 资产中枢）
+      parameters:
+        - name: projectId
+          in: query
+          schema: { type: integer }
+          description: 按项目引用过滤，不传则返回工作空间全部资产
+        - name: type
+          in: query
+          schema: { type: string, enum: [image, video, audio, text] }
+        - name: visibility
+          in: query
+          schema: { type: string, enum: [private, public] }
+        - name: unreferenced
+          in: query
+          schema: { type: boolean }
+          description: true 时只返回未被任何项目/画布引用的资产，用于「未归类」虚拟分组
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Asset' }
+                  nextCursor: { type: [string, 'null'] }
+
+  /v1/assets/{assetId}:
+    get:
+      tags: [Assets]
+      summary: 资产详情（含快照与溯源）
+      description: 返回 `genSnapshot` 与 `snapshotHash`，M1 的一键同款由客户端据此填充表单。
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 资产详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Asset' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Assets]
+      summary: 修改资产（当前仅支持公开开关）
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                visibility:
+                  type: string
+                  enum: [private, public]
+                  description: public 即自动进广场；切回 private 立即下架
+      responses:
+        '200':
+          description: 更新后的资产
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Asset' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403':
+          description: 审核未通过（reviewStatus != pass）的资产不可公开
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [Assets]
+      summary: 删除资产（软删除）
+      description: |
+        若 `refCount > 0`（被项目或画布引用）→ **409 ASSET_REFERENCED**，
+        必须先在画布/项目中解除引用。这是为了让「一键同款」链路永不残缺。
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '204': { description: 已软删除 }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/AssetReferenced' }
+
+  # 【评审补充 F2】原契约缺「误拦申诉」端点 —— DR-003 的直接缺口：
+  #   内容安全依赖 Provider 内置审核，平台不自行判定（DR-003）。既然不自判，
+  #   就必然会出现误拦，而 DR-003 明确要求「提供误拦申诉入口（工单）」。
+  #   契约里没有这个端点，等于承诺了机制却没留通道。
+  /v1/assets/{assetId}/appeal:
+    post:
+      tags: [Assets]
+      summary: 对审核拦截提出申诉
+      description: |
+        仅当 `reviewStatus = blocked` 时可申诉。申诉不改写审核结论本身
+        （平台不自行判定内容安全），只登记人工复核请求并更新 `appealStatus`。
+        **申诉成功后的处置顺序**：先由运营人工判定，确认误拦后再决定是否
+        转由平台侧二次审核通道处理 —— 该通道在架构上已预留（DR-003），默认不启用。
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, maxLength: 500, description: 用户说明为何认为被误拦 }
+                contact: { type: string, maxLength: 128, description: 可选回访方式 }
+      responses:
+        '201':
+          description: 申诉已登记
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewAppeal' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 该资产未处于 blocked 状态，或已有处理中的申诉
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ==================== Projects ====================
+  /v1/projects:
+    get:
+      tags: [Projects]
+      summary: 项目列表（左侧树）
+      responses:
+        '200':
+          description: 项目列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Project' }
+    post:
+      tags: [Projects]
+      summary: 创建项目
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+
+  /v1/projects/{projectId}/assets:
+    post:
+      tags: [Projects]
+      summary: 将资产加入项目（建立引用，不复制实体）
+      description: 同一资产可被多个项目引用；重复引用为幂等成功。
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assetId]
+              properties:
+                assetId: { type: integer }
+      responses:
+        '200':
+          description: 引用已建立
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/projects/{projectId}/assets/{assetId}:
+    delete:
+      tags: [Projects]
+      summary: 解除项目对资产的引用（不删除资产）
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '204': { description: 引用已解除；资产实体保留，refCount 减一 }
+
+  # ==================== Canvases ====================
+  # 【评审补充 F5】原契约只有 GET/PUT，缺创建入口 —— 没有创建就无法产生 canvasId，
+  #  PUT 也就无从调用。属于「有写无建」的断链。（画布功能本体属 P1，端点先补上）
+  /v1/canvases:
+    post:
+      tags: [Canvases]
+      summary: 创建画布
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+                projectId:
+                  type: integer
+                  description: 可选归属项目；不传则先在「未归类」下
+      responses:
+        '201':
+          description: 画布已创建（viewport / snap / grid 取服务端默认值）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Canvas' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /v1/canvases/{canvasId}:
+    get:
+      tags: [Canvases]
+      summary: 读取画布
+      description: 返回 `viewport` 与 `nodes`，可直接用于前端状态恢复（序列化往返一致）。
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+      responses:
+        '200':
+          description: 画布
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Canvas' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Canvases]
+      summary: 覆盖保存画布（整体替换，含节点增删改与视图）
+      description: |
+        采用整体替换而非增量 PATCH：画布是「同一时刻的一致快照」，增量同步会引入
+        合并冲突与顺序依赖，而整块数据量很小（单画布节点数通常 < 200）。
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CanvasWrite' }
+      responses:
+        '200':
+          description: 保存成功，返回归一化后的画布（服务端分配的 z 序与 id）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Canvas' }
+        '409':
+          description: 版本冲突（`updatedAt` 落后于服务端）
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ==================== Discover ====================
+  /v1/discover:
+    get:
+      tags: [Discover]
+      summary: 广场作品流（只读消费版）
+      description: |
+        仅返回「平台自产 + `visibility=public` + `reviewStatus=pass`」的资产。
+        P0 **不提供**点赞/评论/关注/推荐排序（属 P2），本接口只做分类过滤与时间倒序。
+        取消人工选品后，内容完全来自用户自主公开——广场为空是预期冷启动状态，客户端需有引导空态。
+      parameters:
+        - name: tab
+          in: query
+          schema:
+            type: string
+            enum: [all, marketing, short_drama, ecommerce, animation, film, general]
+            default: all
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 60, default: 24 }
+      responses:
+        '200':
+          description: 作品流
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Asset' }
+                  nextCursor: { type: [string, 'null'] }
+                  total: { type: integer, description: 用于空态判断（0 → 展示引导） }
+
+  # ==================== Credits ====================
+  /v1/credits/balance:
+    get:
+      tags: [Credits]
+      summary: 积分余额
+      responses:
+        '200':
+          description: 余额
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreditBalance' }
+
+  /v1/credits/ledger:
+    get:
+      tags: [Credits]
+      summary: 流水（只追加账本）
+      parameters:
+        - name: jobId
+          in: query
+          schema: { type: integer }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+      responses:
+        '200':
+          description: 流水列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/LedgerEntry' }
+                  nextCursor: { type: [string, 'null'] }
+
+  # ==================== Catalog ====================
+  /v1/models:
+    get:
+      tags: [Catalog]
+      summary: 模型注册表（驱动参数面板与主备切换）
+      responses:
+        '200':
+          description: 可用模型
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Model' }
+
+  /v1/skills:
+    get:
+      tags: [Catalog]
+      summary: 技能列表（`/` 指令体系）
+      responses:
+        '200':
+          description: 已启用技能
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Skill' }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 64 }
+      description: 客户端生成的唯一键。同键且载荷相同 → 返回首次结果；载荷不同 → 409。
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: integer }
+    AssetId:
+      name: assetId
+      in: path
+      required: true
+      schema: { type: integer }
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: integer }
+    CanvasId:
+      name: canvasId
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    BadRequest:
+      description: 参数校验失败
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthenticated:
+      description: 未登录或凭证失效
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: 资源不存在或已软删除
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    InsufficientCredit:
+      description: |
+        余额不足以预扣。**预扣发生在受理阶段**，任务不入队——
+        这是刻意的：限流发生在业务层，规则比网关层限流更可解释。
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            insufficient:
+              value:
+                type: https://docs.example.com/errors/insufficient-credit
+                title: Insufficient credit
+                status: 402
+                code: INSUFFICIENT_CREDIT
+                detail: 需要预扣 20 积分，当前余额 8
+                required: 20
+                balance: 8
+    AssetReferenced:
+      description: 资产被项目或画布引用，拒绝删除
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            referenced:
+              value:
+                type: https://docs.example.com/errors/asset-referenced
+                title: Asset is referenced
+                status: 409
+                code: ASSET_REFERENCED
+                detail: 该资产被 3 处引用，请先解除引用
+                refCount: 3
+    IdempotencyConflict:
+      description: 幂等键已存在但载荷不同
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    RateLimited:
+      description: 超出频率配额（审核拦截计频率但**不扣积分**，此处指提交频率超限）
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ProviderUnavailable:
+      description: Provider 不可用，可按 Registry 切主备或排队
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details
+      required: [title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        code: { type: string, description: 见 info 描述中的错误码总表 }
+        detail: { type: string }
+        instance: { type: string }
+      additionalProperties: true
+
+    GenSnapshot:
+      type: object
+      description: |
+        **不可变生成快照**，一键同款的唯一真源。写入后禁止修改（数据库触发器保护）。
+        还原时只读本快照，绝不回查当前 Skill 定义 —— 否则技能改版会让历史作品静默漂移。
+      required: [schemaVersion, prompt, model, seed]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        prompt: { type: string }
+        negativePrompt: { type: string }
+        model: { type: string, description: model.modelKey }
+        modelVersion: { type: string }
+        seed: { type: integer }
+        duration: { type: integer, description: 秒，视频用 }
+        aspect: { type: string, enum: ['16:9', '9:16', '1:1', '4:3', '3:4'] }
+        style: { type: string }
+        referenceAssetIds:
+          type: array
+          items: { type: integer }
+          description: 参考素材的**引用**，非副本；被引资产因此受软删除保护
+      additionalProperties: true
+
+    Asset:
+      type: object
+      required: [id, type, mediaUrl, visibility, reviewStatus, genSnapshot, refCount, createdAt]
+      properties:
+        id: { type: integer }
+        type: { type: string, enum: [image, video, audio, text] }
+        mediaUrl: { type: string, format: uri }
+        thumbUrl: { type: [string, 'null'], format: uri }
+        width: { type: [integer, 'null'] }
+        height: { type: [integer, 'null'] }
+        durationMs: { type: [integer, 'null'] }
+        visibility:
+          type: string
+          enum: [private, public]
+          description: public 即自动进广场；切回 private 立即下架
+        reviewStatus:
+          type: string
+          enum: [pass, blocked, pending]
+          description: 直接透传 Provider 的审核结果，平台不自行判定
+        reviewReason: { type: [string, 'null'] }
+        appealStatus:
+          type: string
+          enum: [none, pending, accepted, rejected]
+          default: none
+          description: |
+            【评审补充 F2】误拦申诉状态。仅当 `reviewStatus = blocked` 时可能非 `none`。
+            `accepted` 表示确认误拦（是否因此放开该资产由运营决定，平台不自动改写
+            审核结论 —— DR-003 明确平台不自行判定内容安全）。
+        genSnapshot: { $ref: '#/components/schemas/GenSnapshot' }
+        snapshotHash:
+          type: string
+          readOnly: true
+          description: |
+            快照的稳定哈希（键序无关）。客户端比对「当前表单快照」与它：
+            相同 → 未改参数 → 直接复用 `mediaUrl`（零等待零积分）；
+            不同 → 提交新 job，并在提交前提示「结果将与原作品存在差异」。
+
+            **派生字段**：不对应数据库列，由 `genSnapshot` 实时计算。
+            标 `readOnly` 是为了防止实现者去找这一列（找不到就会自作主张加一列，
+            然后与快照不一致 —— 这正是「派生值落库」的经典陷阱）。
+        refCount: { type: integer, description: 被项目与画布引用的总数；> 0 时禁止硬删 }
+        skill: { $ref: '#/components/schemas/SkillRef' }
+        sourceJobId: { type: [integer, 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    SkillRef:
+      type: object
+      properties:
+        key: { type: string }
+        version: { type: integer }
+      description: 仅用于溯源与能力归因，不参与还原；无技能来源时该字段缺省
+
+    JobCreateRequest:
+      type: object
+      required: [model, params]
+      properties:
+        model: { type: string, description: model.modelKey }
+        skillKey: { type: string }
+        skillVersion: { type: integer }
+        params:
+          type: object
+          description: 生成入参（比例、时长、风格、种子、负面提示词等）
+          additionalProperties: true
+        visibility:
+          type: string
+          enum: [private, public]
+          default: private
+          description: 产出资产的初始可见性
+
+    Job:
+      type: object
+      required: [id, status, progress, preDeducted, settled, createdAt]
+      properties:
+        id: { type: integer }
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, blocked, cancelled]
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        params: { type: object, additionalProperties: true }
+        preDeducted: { type: integer, description: 预扣积分 }
+        settled:
+          type: integer
+          description: 实际结算积分。失败/取消/拦截一律为 0（已全额返还）
+        errorCode:
+          type: [string, 'null']
+          enum:
+            - USER_CANCELLED
+            - PROVIDER_TIMEOUT
+            - PROVIDER_ERROR
+            - CONTENT_BLOCKED_BY_PROVIDER
+            - CREDIT_SETTLE_FAILED
+            - null
+        errorMessage: { type: [string, 'null'] }
+        assetId: { type: [integer, 'null'], description: 成功后产出的资产 }
+        skill:
+          allOf: [{ $ref: '#/components/schemas/SkillRef' }]
+          readOnly: true
+          description: |
+            【评审补充 F4】任务级的技能溯源。原契约只在 `JobCreateRequest` 里接收
+            `skillKey/skillVersion`，但 `Job` 不回显、数据模型的 `job` 表也没有对应列
+            —— 结果是「知道提交时带了技能，事后无法统计哪个技能真正带来产出」，
+            M3 的技能归因与模板迭代因此失去数据源。
+            现在任务与资产两侧都可溯源：`Job.skill` 记「提交时用了什么」，
+            `Asset.skill` 记「产出物由什么生成」。
+        createdAt: { type: string, format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+
+    JobEvent:
+      type: object
+      required: [eventId, taskId, type]
+      properties:
+        eventId:
+          type: integer
+          description: 单调递增，即 SSE 的 `id:` 与重连时的 Last-Event-ID
+        taskId: { type: integer }
+        type:
+          type: string
+          enum: [queued, running, progress, succeeded, failed, blocked]
+        payload: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+
+    Project:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        assetCount:
+          type: integer
+          readOnly: true
+          description: |
+            该项目通过 `project_asset` 引用的资产数量。**派生字段**，不对应
+            `project` 表的列 —— 由关联表聚合得出。同理不得落库为冗余列。
+        coverAssetId:
+          type: [integer, 'null']
+          description: 仅引用，不持有；封面资产被删除时置空而不级联删除项目
+        createdAt: { type: string, format: date-time }
+
+    CanvasNode:
+      type: object
+      description: |
+        画布节点**只保存引用**（refType + refId），绝不内嵌资产副本 —— 这与后端多对多引用模型一致，
+        也是「一次生成、多处复用」不产生副本的前提。
+      required: [nodeUid, refType, refId, x, y, z]
+      properties:
+        nodeUid: { type: string, description: 客户端生成的稳定 id，保证序列化往返一致 }
+        refType: { type: string, enum: [asset], default: asset }
+        refId: { type: integer }
+        x: { type: integer }
+        y: { type: integer }
+        w: { type: integer }
+        z: { type: integer }
+
+    Canvas:
+      type: object
+      required: [id, viewport, nodes]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        viewport:
+          type: object
+          required: [x, y, scale]
+          properties:
+            x: { type: number }
+            y: { type: number }
+            scale: { type: number, minimum: 0.25, maximum: 2.6 }
+        snap: { type: boolean, default: true }
+        grid: { type: integer, default: 24 }
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/CanvasNode' }
+        updatedAt: { type: string, format: date-time }
+
+    CanvasWrite:
+      type: object
+      description: 整体替换保存（含视图与全部节点）
+      required: [viewport, nodes]
+      properties:
+        name: { type: string }
+        viewport: { $ref: '#/components/schemas/Canvas/properties/viewport' }
+        snap: { type: boolean }
+        grid: { type: integer }
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/CanvasNode' }
+        updatedAt:
+          type: string
+          format: date-time
+          description: 乐观锁；落后于服务端则返回 409
+
+    CreditBalance:
+      type: object
+      required: [balance]
+      properties:
+        balance: { type: integer, description: 权威值来自流水合计，账户余额为其物化冗余 }
+        updatedAt: { type: string, format: date-time }
+
+    LedgerEntry:
+      type: object
+      required: [id, type, amount, balanceAfter, createdAt]
+      properties:
+        id: { type: integer }
+        jobId: { type: [integer, 'null'] }
+        type:
+          type: string
+          enum: [pre, settle, refund, grant, adjust]
+          description: pre=预扣 settle=结算 refund=返还 grant=发放 adjust=人工调整
+        amount: { type: integer, description: 有符号，扣为负 }
+        balanceAfter: { type: integer }
+        note: { type: string }
+        createdAt: { type: string, format: date-time }
+      description: 只追加账本，不可修改或删除
+
+    Model:
+      type: object
+      required: [id, modelKey, displayName, capability]
+      properties:
+        id: { type: integer }
+        modelKey: { type: string }
+        displayName: { type: string }
+        capability: { type: string, enum: [txt2img, img2video, txt2video, audio] }
+        costProfile:
+          type: object
+          description: 驱动前端参数面板计价与预扣估算
+          properties:
+            unit: { type: string, enum: [per_image, per_second, per_1k_token] }
+            price: { type: number }
+            currency: { type: string, default: CNY }
+        latencyProfile:
+          type: object
+          properties:
+            p50Ms: { type: integer }
+            p95Ms: { type: integer }
+        isPrimary: { type: boolean }
+        fallbackOf: { type: [integer, 'null'], description: 指向主模型 id，形成主备切换 }
+
+    Skill:
+      type: object
+      required: [key, version, name]
+      properties:
+        key: { type: string }
+        version: { type: integer, description: 版本只增不改，历史作品引用固定版本 }
+        name: { type: string }
+        promptTemplate: { type: string }
+        paramsSchema: { type: object, additionalProperties: true }
+
+    UploadSession:
+      type: object
+      description: 【评审补充 F1】分片上传会话。文件直传对象存储，BFF 只签发与登记。
+      required: [uploadId, parts, expiresAt]
+      properties:
+        uploadId: { type: string }
+        assetId:
+          type: [integer, 'null']
+          description: complete 之后回填；在此之前为空
+        parts:
+          type: array
+          description: 预签名分片地址，客户端据此直传
+          items:
+            type: object
+            required: [partNumber, url]
+            properties:
+              partNumber: { type: integer, minimum: 1 }
+              url: { type: string, format: uri }
+        expiresAt:
+          type: string
+          format: date-time
+          description: 会话过期时间；过期后需重新创建（不能无限期挂着一个未完成上传）
+        status:
+          type: string
+          enum: [created, uploading, completed, expired, aborted]
+          default: created
+
+    ReviewAppeal:
+      type: object
+      description: 【评审补充 F2】误拦申诉记录。平台不自行判定内容安全，只登记与流转。
+      required: [id, assetId, status, createdAt]
+      properties:
+        id: { type: integer }
+        assetId: { type: integer }
+        reason: { type: string }
+        status:
+          type: string
+          enum: [pending, accepted, rejected]
+          description: accepted 表示确认误拦；不自动改写资产的 reviewStatus
+        handledBy: { type: [string, 'null'], description: 处理人（运营）标识 }
+        handledNote: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        handledAt: { type: [string, 'null'], format: date-time }

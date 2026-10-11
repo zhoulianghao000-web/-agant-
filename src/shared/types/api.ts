@@ -1,136 +1,79 @@
+import type { components } from './generated';
+
 /**
- * API 类型 —— 手工镜像 `阶段0-接口契约-v1.yaml`。
+ * API 类型入口（评审发现 F6 / G6 闭环）。
  *
- * ⚠️ Sprint1 任务：改用 openapi-typescript 从契约自动生成，消除前后端字段漂移。
- *    生成后本文件应改为 `export type { ... } from './generated'`，不再手写。
+ * 自 2026-10-12 起，**实体类型全部由契约生成**（`npm run contract:types`）。
+ * 本文件不再手抄字段 —— 手抄契约的后果是字段漂移，而漂移不会让任何一侧编译失败，
+ * 只会在联调时以「后端返回了但前端没定义」的形式爆发。
  *
- * 当前手工维护的理由：阶段 0 需要一份「可编译的最小契约类型」来让骨架先跑起来，
- * 而契约本身还在评审中（评审通过前生成会有反复改动的噪音）。
+ * 手写内容只剩两类：
+ *   1. 客户端侧的查询参数形状（契约里是 query 参数，不是可复用的 schema）
+ *   2. 跨模块共用的分页包装（契约在各端点内联了 items/nextCursor，未抽 schema）
+ *
+ * ⚠️ 需要改字段时改 **contracts/openapi.yaml**，然后跑 `npm run contract:types`。
+ *    直接改本文件会在下一次生成时被覆盖。
  */
 
-export type AssetType = 'image' | 'video' | 'audio' | 'text';
-export type Visibility = 'private' | 'public';
-export type ReviewStatus = 'pass' | 'blocked' | 'pending';
+type Schemas = components['schemas'];
 
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
+// ---------------------------------------------------------------- 实体
+export type Problem = Schemas['Problem'];
+export type GenSnapshot = Schemas['GenSnapshot'];
+export type Asset = Schemas['Asset'];
+export type Job = Schemas['Job'];
+export type JobEvent = Schemas['JobEvent'];
+export type JobCreateRequest = Schemas['JobCreateRequest'];
+export type Project = Schemas['Project'];
+export type Canvas = Schemas['Canvas'];
+export type CanvasNode = Schemas['CanvasNode'];
+export type CanvasWrite = Schemas['CanvasWrite'];
+export type CanvasViewport = Schemas['Canvas']['viewport'];
+export type UploadSession = Schemas['UploadSession'];
+export type ReviewAppeal = Schemas['ReviewAppeal'];
+export type LedgerEntry = Schemas['LedgerEntry'];
+export type CreditBalance = Schemas['CreditBalance'];
+export type Model = Schemas['Model'];
+export type Skill = Schemas['Skill'];
+export type SkillRef = Schemas['SkillRef'];
 
-/** 异步阶段失败码，与契约定义的 Job.errorCode 枚举一致 */
-export type JobErrorCode =
-  | 'USER_CANCELLED'
-  | 'PROVIDER_TIMEOUT'
-  | 'PROVIDER_ERROR'
-  | 'CONTENT_BLOCKED_BY_PROVIDER'
-  | 'CREDIT_SETTLE_FAILED';
+// ------------------------------------------------------------------ 枚举
+// 一律从实体上取，而不是重新写一遍字面量联合 ——
+// 重写一遍就等于又造了一个会漂移的副本，只是漂移地点从字段名换成了枚举值。
+export type AssetType = Asset['type'];
+export type Visibility = NonNullable<Asset['visibility']>;
+export type ReviewStatus = NonNullable<Asset['reviewStatus']>;
+export type AppealStatus = NonNullable<Asset['appealStatus']>;
+export type JobStatus = NonNullable<Job['status']>;
+export type JobErrorCode = NonNullable<Job['errorCode']>;
+export type JobEventType = JobEvent['type'];
+export type LedgerEntryType = LedgerEntry['type'];
+export type ModelCapability = Model['capability'];
 
-export interface Problem {
-  type?: string;
-  title: string;
-  status: number;
-  code: string;
-  detail?: string;
-  [key: string]: unknown;
+// ------------------------------------------------------- 客户端侧手写
+/** 资产列表的查询过滤条件（对应 GET /v1/assets 的 query 参数） */
+export interface AssetFilters {
+  projectId?: number;
+  type?: AssetType;
+  visibility?: Visibility;
+  /** true 时只返回未被任何项目/画布引用的资产，用于「未归类」分组 */
+  unreferenced?: boolean;
+  cursor?: string;
 }
 
-export interface GenSnapshot {
-  schemaVersion: 1;
-  prompt: string;
-  negativePrompt?: string;
-  model: string;
-  modelVersion?: string;
-  seed: number;
-  duration?: number;
-  aspect?: '16:9' | '9:16' | '1:1' | '4:3' | '3:4';
-  style?: string;
-  referenceAssetIds?: number[];
-  [key: string]: unknown;
+/** 任务列表的查询过滤条件（对应 GET /v1/jobs 的 query 参数） */
+export interface JobFilters {
+  status: JobStatus | 'active';
+  cursor?: string;
 }
 
-export interface SkillRef {
-  key: string;
-  version: number;
-}
-
-export interface Asset {
-  id: number;
-  type: AssetType;
-  mediaUrl: string;
-  thumbUrl: string | null;
-  width: number | null;
-  height: number | null;
-  durationMs: number | null;
-  visibility: Visibility;
-  reviewStatus: ReviewStatus;
-  reviewReason: string | null;
-  genSnapshot: GenSnapshot;
-  /** 快照的稳定哈希（键序无关），用于判定「一键同款是否改过参数」 */
-  snapshotHash: string;
-  /** 被项目与画布引用的总数；> 0 时禁止硬删（一键同款链路保护） */
-  refCount: number;
-  skill?: SkillRef;
-  sourceJobId: number | null;
-  createdAt: string;
-}
-
-export interface Job {
-  id: number;
-  status: JobStatus;
-  progress: number;
-  params: Record<string, unknown>;
-  preDeducted: number;
-  /** 失败 / 取消 / 拦截一律为 0（已全额返还） */
-  settled: number;
-  errorCode: JobErrorCode | null;
-  errorMessage: string | null;
-  assetId: number | null;
-  createdAt: string;
-  finishedAt: string | null;
-}
-
-export interface JobEvent {
-  eventId: number;
-  taskId: number;
-  type: 'queued' | 'running' | 'progress' | 'succeeded' | 'failed' | 'blocked';
-  payload: Record<string, unknown>;
-  createdAt: string;
-}
-
-export interface CanvasNode {
-  nodeUid: string;
-  refType: 'asset';
-  refId: number;
-  x: number;
-  y: number;
-  w: number;
-  z: number;
-}
-
-export interface CanvasViewport {
-  x: number;
-  y: number;
-  scale: number;
-}
-
-export interface CanvasDoc {
-  id: number;
-  name: string;
-  viewport: CanvasViewport;
-  snap: boolean;
-  grid: number;
-  nodes: CanvasNode[];
-  updatedAt: string;
-}
-
-export interface LedgerEntry {
-  id: number;
-  jobId: number | null;
-  type: 'pre' | 'settle' | 'refund' | 'grant' | 'adjust';
-  amount: number;
-  balanceAfter: number;
-  note: string;
-  createdAt: string;
-}
-
+/** 游标分页包装 */
 export interface Paged<T> {
   items: T[];
   nextCursor: string | null;
+}
+
+/** 带总数的分页（广场空态判断需要 total === 0） */
+export interface PagedWithTotal<T> extends Paged<T> {
+  total: number;
 }

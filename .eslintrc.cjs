@@ -10,7 +10,9 @@ module.exports = {
   parser: '@typescript-eslint/parser',
   parserOptions: { ecmaVersion: 'latest', sourceType: 'module' },
   plugins: ['@typescript-eslint', 'react-refresh'],
-  ignorePatterns: ['dist', 'node_modules', '*.cjs'],
+  // generated.ts 由 `npm run contract:types` 从契约生成，是机器产物：
+  // lint 它等于和代码生成器较劲，正确做法是在源头（契约）约束
+  ignorePatterns: ['dist', 'node_modules', '*.cjs', 'src/shared/types/generated.ts'],
   rules: {
     'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],

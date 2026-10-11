@@ -5,7 +5,7 @@
 ## 关联
 
 - 任务 / 风险：
-- 契约变更（若是）：是否需要同步 `阶段0-接口契约-v1.yaml`
+- 契约变更（若是）：是否需要同步 `contracts/openapi.yaml`，并已跑 `npm run contract:types`
 
 ## 自检清单
 

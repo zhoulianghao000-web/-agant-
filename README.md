@@ -27,8 +27,13 @@ npm run verify         # lint + typecheck + test + build（提交前必跑）
 | `npm run build:staging` | 预发构建 |
 | `npm run typecheck` | 仅类型检查（`tsc --noEmit`） |
 | `npm run lint` | ESLint，`--max-warnings 0` |
-| `npm run test` | Vitest 单元测试（单次） |
-| `npm run verify` | 以上四项串行执行 —— **CI 与本地用同一套口径** |
+| `npm run test` | Vitest 单元测试（单次，含契约完整性门禁） |
+| `npm run contract:types` | 从 `contracts/openapi.yaml` 重新生成 `src/shared/types/generated.ts` |
+| `npm run contract:check` | 重新生成类型并校验与仓库内文件一致（契约改了却忘了生成 → 失败） |
+| `npm run verify` | lint → typecheck → test → contract:check → build —— **CI 与本地用同一套口径** |
+
+> 改契约的流程：编辑 `contracts/openapi.yaml` → `npm run contract:types` → 提交两者。
+> 只改契约不重新生成，CI 会拦截；直接改 `generated.ts` 会在下次生成时被覆盖。
 
 ---
 
@@ -44,11 +49,15 @@ src/
 ├─ shared/              唯一允许被 features 依赖的目录
 │   ├─ data/            queryKeys（唯一 key 工厂）· client · sse
 │   ├─ lib/             snapshot（快照比对）· idempotency
-│   ├─ types/           api（当前手工镜像契约，Sprint1 改为生成）
+│   ├─ types/           api（从契约生成物再导出）· generated（机器产物，勿手改）
 │   └─ ui/              Card · Pill · EmptyState（Sprint1 补齐 Tab / IconButton / Skeleton）
 ├─ store/               全局 store（只放会话级小状态）
 └─ styles/              design-tokens.css（Design Token 单点真源）
 ```
+
+仓库根另有 **`contracts/openapi.yaml`** —— 接口契约的唯一真源。它必须在仓库内：
+否则 CI 无法校验契约（跑在仓库里，看不到父目录），`contract:types` 也就无从执行。
+评审发现 F6 已据此闭环。
 
 **依赖方向单向**：`app → features → shared`。features 之间不得互相 import；跨模块协作只通过路由跳转与 Query 缓存。
 
@@ -92,7 +101,7 @@ src/
 
 ## 待办（Sprint1 第一批）
 
-1. 用 `openapi-typescript` 从 `../阶段0-接口契约-v1.yaml` 生成 `shared/types/generated.ts`，替换手工镜像
+1. ~~用 `openapi-typescript` 从契约生成类型，替换手工镜像~~ → **已完成（2026-10-12）**：契约迁入 `contracts/openapi.yaml`，`npm run contract:types` 生成 `shared/types/generated.ts`，`api.ts` 改为从生成物再导出；CI 增加 `contract:check` 防止契约与类型不同步
 2. 补齐 `shared/ui`：Tab / IconButton / Skeleton
 3. M1 最小闭环：提交任务 → 进度 → 结果
 4. 把调试台（`../p0-debug-console.html`）的 10 条断言改写为 Playwright e2e

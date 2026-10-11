@@ -41,6 +41,12 @@ jobs:
       - name: Unit tests
         run: npm run test
 
+      # 契约是前后端唯一共同相信的东西，必须在这里校验：
+      #   1. 从契约重新生成类型，若与仓库内的 generated.ts 有差异 → 有人改了契约却没重新生成
+      #   2. test 阶段已用 yaml 解析器抓过重复 mapping key（OpenAPI 校验器的盲区）
+      - name: Contract types in sync
+        run: npm run contract:check
+
       - name: Build (production)
         run: npm run build
         env:

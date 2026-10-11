@@ -1,0 +1,7 @@
+# 机器产物：由 `npm run contract:types` 从契约生成，格式化了下次生成又会变回去，
+# 只会让 `contract:check` 的 git diff 永远非空
+src/shared/types/generated.ts
+
+dist/
+node_modules/
+package-lock.json

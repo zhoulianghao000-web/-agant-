@@ -1,7 +1,7 @@
 import type { Problem } from '@/shared/types/api';
 
 /**
- * HTTP 客户端（对应接口契约 阶段0-接口契约-v1.yaml）
+ * HTTP 客户端（对应接口契约 `contracts/openapi.yaml`）
  *
  * 只做四件事：拼基址、注入凭证、注入幂等键、把 Problem 结构转成可判别的错误类型。
  * 不做重试（写操作不自动重试，避免重复生成与重复扣费）。
