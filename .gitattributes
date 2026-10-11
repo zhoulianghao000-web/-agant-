@@ -1,0 +1,21 @@
+# 统一换行符为 LF。
+#
+# 为什么这不只是风格问题：
+#   `npm run contract:check` 依赖 `git diff --exit-code` 来判断「契约改了但类型没重新生成」。
+#   而 openapi-typescript 写出的是 LF。若 Windows 上 core.autocrlf=true（Git for Windows 默认），
+#   检出后工作区是 CRLF、生成后是 LF，diff 的判定就取决于 git 的 clean filter 行为 ——
+#   结果可能是假失败（明明同步却报差异）或假通过。
+#   显式声明 eol=lf 后，这个不确定性消失了：三个平台的工作区都是 LF。
+#
+# 验证方式：改动契约里的任一字段但不跑 contract:types，contract:check 必须失败。
+* text=auto eol=lf
+
+# 二进制资源不参与换行符转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
