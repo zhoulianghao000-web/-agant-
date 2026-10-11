@@ -1,0 +1,36 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# ---------------------------------------------------------------------------
+# 环境变量 —— 对应风险 R13（API Key 泄漏）
+# 规则：只有 .env.example 与 .env.development 允许入库；
+#       .env.staging / .env.production 的真实值一律由 CI Secret 注入，不入库。
+# 注意：前端 bundle 里的 VITE_* 是公开可见的，**永远不要把模型 API Key 放进来**；
+#       Key 只存在于 BFF 侧，前端只持有用户 token。
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.staging
+.env.production
+
+# 编辑器与系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志与缓存
+*.log
+npm-debug.log*
+.eslintcache
+.vite/
+coverage/
+
+# 测试产物（Playwright 在 Sprint1 接入）
+test-results/
+playwright-report/

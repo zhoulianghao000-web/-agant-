@@ -1,0 +1,103 @@
+/* ============================================================================
+ * 三合一 AIGC 创作平台 · Design Token v1
+ * 来源：阶段 0 · 任务 0.7（主色：霓虹青 #00C2FF）
+ * 单点真源：本文件的 CSS 变量。tailwind.config.ts 中的色值必须与此保持一致。
+ *
+ * 硬规则（见 阶段0-DesignToken-v1.md §4）
+ *   1. 业务 CSS / 组件中禁止硬编码色值，一律引用变量或 Tailwind 语义类
+ *   2. 品牌底上的文字必须用 --text-on-brand（近黑）：对比度 9.51 而非 2.07
+ *   3. --text-disabled 不达 AA，仅限禁用态与装饰
+ * ========================================================================= */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* --- 品牌色板 --- */
+    --brand-50: #e6faff;
+    --brand-100: #c2f2ff;
+    --brand-200: #8ae6ff;
+    --brand-300: #4fd8ff;
+    --brand-400: #1ccbff;
+    --brand-500: #00c2ff;
+    --brand-600: #00a3d6;
+    --brand-700: #0082ad;
+    --brand-800: #006184;
+    --brand-900: #003f57;
+
+    --brand: var(--brand-500);
+    --brand-hover: var(--brand-400);
+    --brand-active: var(--brand-600);
+    --brand-gradient: linear-gradient(90deg, #0057ff, #00e0ff);
+
+    /* --- 背景与表面 --- */
+    --bg-base: #0b0b0e;
+    --bg-elevated: #121216;
+    --surface: #17171c;
+    --surface-hover: #1f1f26;
+    --surface-sunken: #101013;
+
+    /* --- 边框 --- */
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --border-brand: rgba(0, 194, 255, 0.45);
+
+    /* --- 文字（对比度基于 --bg-base 实测） --- */
+    --text-primary: #ffffff; /* 19.65 : 1 */
+    --text-secondary: #9ca0aa; /*  7.51 : 1 */
+    --text-tertiary: #8a8f99; /*  6.06 : 1 */
+    --text-disabled: #6b6f79; /*  3.91 : 1 — 仅禁用态与装饰 */
+    --text-on-brand: #0b0b0e; /*  9.51 : 1 on brand — 品牌底必须用近黑 */
+
+    /* --- 状态色 --- */
+    --success: #34d399;
+    --warning: #fbbf24;
+    --danger: #f87171;
+    --info: #4d6bfe;
+    --accent-marketing: #7b5cff;
+
+    --shadow-focus: 0 0 0 3px rgba(0, 194, 255, 0.22);
+
+    --dur-instant: 120ms;
+    --dur-fast: 180ms;
+    --dur-base: 240ms;
+    --dur-slow: 320ms;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-bg-base text-content-primary font-sans antialiased;
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+  }
+}
+
+@layer components {
+  /* 胶囊基础形。颜色由语义工具类叠加（border-border / text-content-secondary 等），
+     避免在 CSS 里再定义一套颜色 —— 颜色单点真源仍是上面的变量 */
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] whitespace-nowrap;
+  }
+}
+
+@layer utilities {
+  /* 无障碍：尊重系统减弱动效设置（对应阶段0-前端约定 §5） */
+  @media (prefers-reduced-motion: reduce) {
+    :root {
+      --dur-instant: 0ms;
+      --dur-fast: 0ms;
+      --dur-base: 0ms;
+      --dur-slow: 0ms;
+    }
+  }
+}

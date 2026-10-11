@@ -1,0 +1,89 @@
+name: CI
+
+# 出口标准（实施计划 0.6）：lint + typecheck + test + build 必须全绿
+# 分支策略：main 为受保护分支，只接受 PR；feat/* 与 fix/* 为工作分支
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一次未完成的运行，避免排队浪费
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: lint / typecheck / test / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build (production)
+        run: npm run build
+        env:
+          # 生产构建的 VITE_* 由仓库 Variables / Secrets 注入。
+          # ⚠️ 这里只允许放公开可见的配置；模型 API Key 绝不入前端（见 .env.example 红线）
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL_PROD }}
+          VITE_APP_ENV: production
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist
+          retention-days: 7
+
+  # staging 构建在 main 分支推送时额外产出，用于验证三套环境的配置装配无误
+  build-staging:
+    name: build (staging config)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build (staging)
+        run: npm run build:staging
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL_STAGING }}
+          VITE_APP_ENV: staging
+
+      - name: Upload staging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-staging
+          path: dist
+          retention-days: 7
