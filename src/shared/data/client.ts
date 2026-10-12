@@ -7,7 +7,12 @@ import type { Problem } from '@/shared/types/api';
  * 不做重试（写操作不自动重试，避免重复生成与重复扣费）。
  */
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
+/**
+ * 导出是刻意的：界面在请求失败时需要能告诉用户「该配哪个变量」。
+ * 若把基址藏在本模块内，页面只能显示「请求失败」——
+ * 而「忘了配 VITE_API_BASE_URL」恰恰是本地联调最高频的原因。
+ */
+export const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
 export class ApiError extends Error {
   readonly status: number;

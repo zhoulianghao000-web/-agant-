@@ -18,9 +18,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto';
 import { resolveProvider, MODEL_REGISTRY } from './providers/registry';
 import { providerPing } from './providers/ping';
-import { loadLlmConfig, reportLlmConfig } from './config';
-import { resolveLlm } from './llm/deepseek';
-import { enhancePrompt, PROMPT_SKILLS } from './llm/prompt-enhance';
+import { listLlmProfiles, loadLlmConfig, reportLlmConfig } from './config';
+import { resolveLlm } from './llm/openai-compatible';
+import { enhancePrompt, listSkills } from './llm/prompt-enhance';
 import { LlmError } from './llm/types';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -28,16 +28,28 @@ const HOST = process.env.HOST ?? '127.0.0.1';
 const STARTED_AT = Date.now();
 
 /**
- * CORS：本地开发期允许任意来源。
+ * CORS：本地开发期**回显请求来源**（而不是 `*`）。
  *
- * ⚠️ 这不是可以带上线的配置。在拥有正式域名之前，本地联调需要它（调试台在 :8899、
- *    Vite dev 在 :5173、BFF 在 :8787 属于不同 origin）。上线前必须改为白名单，
- *    已记入 `阶段0-仓库脚手架-v1.2.md` 的缺口清单（G11）。
+ * ⚠️ 这里踩过一次坑，值得写下来：最初写的是 `Access-Control-Allow-Origin: *`，
+ *    结果浏览器把**所有**请求都拦了：
+ *      "The value of the 'Access-Control-Allow-Origin' header in the response must not
+ *       be the wildcard '*' when the request's credentials mode is 'include'."
+ *    原因是前端的 `apiFetch` 带 `credentials: 'include'`（要带登录态 Cookie），
+ *    而规范禁止「凭据模式 + 通配来源」的组合 —— 因为那等于允许任何站点带着用户
+ *    Cookie 调我们的接口。所以必须回显具体 Origin，并显式声明允许凭据。
+ *
+ * ⚠️ 回显 Origin 等于**当前允许任何来源**，只适用于本地开发（调试台 :8899、
+ *    Vite dev :5173、BFF :8787 属不同 origin 才需要它）。
+ *    上线前必须改为白名单，已记入缺口清单 G11。
  */
-function applyCors(res: ServerResponse): void {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+function applyCors(req: IncomingMessage, res: ServerResponse): void {
+  const origin = req.headers.origin;
+  res.setHeader('Access-Control-Allow-Origin', origin ?? '*');
+  // 回显 Origin 时必须声明 Vary，否则中间缓存会把 A 站的响应喂给 B 站
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Idempotency-Key');
   res.setHeader('Access-Control-Max-Age', '600');
 }
 
@@ -61,7 +73,7 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 
 const server = createServer((req, res) => {
   void (async () => {
-    applyCors(res);
+    applyCors(req, res);
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const path = url.pathname;
     const method = (req.method ?? 'GET').toUpperCase();
@@ -113,6 +125,12 @@ const server = createServer((req, res) => {
         return;
       }
 
+      if (method === 'GET' && path === '/v1/skills') {
+        // 契约端点。前端技能 chips 的数据源 —— 不是调试用的 /v1/llm/status
+        sendJson(res, 200, listSkills());
+        return;
+      }
+
       if (method === 'GET' && path === '/v1/llm/status') {
         const cfg = loadLlmConfig();
         const report = reportLlmConfig(cfg);
@@ -121,15 +139,11 @@ const server = createServer((req, res) => {
           missing: report.missing,
           masked: report.masked,
           adapter: resolveLlm().describe(),
-          skills: PROMPT_SKILLS.map((s) => ({
-            id: s.id,
-            version: s.version,
-            name: s.name,
-            description: s.description,
-          })),
+          providers: listLlmProfiles(),
+          skills: listSkills().items,
           hint: report.configured
             ? '可调用 POST /v1/prompt/enhance 做提示词增强。'
-            : '尚未配置 LLM。请在 app/.env.llm 填入 LLM_API_KEY，模板见 .env.llm.example。',
+            : `尚未配置 LLM provider「${cfg.provider}」。请在 app/.env.llm 填入 ${cfg.provider.toUpperCase()}_API_KEY，模板见 .env.llm.example。`,
         });
         return;
       }
@@ -137,7 +151,7 @@ const server = createServer((req, res) => {
       if (method === 'POST' && path === '/v1/prompt/enhance') {
         const body = (await readBody(req)) as {
           rawPrompt?: string;
-          skillId?: string;
+          skillKey?: string;
           capability?: 'txt2img' | 'img2video';
           includeReasoning?: boolean;
         } | null;
@@ -150,7 +164,7 @@ const server = createServer((req, res) => {
 
         try {
           const result = await enhancePrompt(
-            { rawPrompt, skillId: body?.skillId, capability: body?.capability },
+            { rawPrompt, skillKey: body?.skillKey, capability: body?.capability },
             { includeReasoning: body?.includeReasoning === true },
           );
           sendJson(res, 200, result);
@@ -175,6 +189,7 @@ const server = createServer((req, res) => {
           'GET /v1/health',
           'GET /v1/provider/status',
           'POST /v1/provider/ping',
+          'GET /v1/skills',
           'GET /v1/llm/status',
           'POST /v1/prompt/enhance',
         ],

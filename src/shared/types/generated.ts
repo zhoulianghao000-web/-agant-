@@ -1098,6 +1098,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/prompt/enhance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 提示词增强（技能体系）
+         * @description 把用户的简短描述扩展成结构完整的生成提示词。**同步调用**，由 LLM 承载。
+         *
+         *     ⚠️ 三个前端必须知道的点：
+         *     1. **耗时不可忽略**：实测 DeepSeek flash ≈2.2s、Kimi k2.6 ≈22s。超过约 5s
+         *        用户就会觉得卡住，因此调用期间必须给出明确的等待反馈，且应防重复点击。
+         *     2. **结果不保证确定**：同一输入两次调用可能得到不同提示词。若要与「一键同款」
+         *        的可还原性对齐，必须把返回的 `enhanced` 与 `skillKey`/`skillVersion`
+         *        **一起落库**，还原时读库而不是重新调用本接口。
+         *     3. **失败不消耗用户积分**：LLM 调用失败（502/503）不应扣费。
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PromptEnhanceRequest"];
+                };
+            };
+            responses: {
+                /** @description 增强结果 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PromptEnhanceResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                502: components["responses"]["UpstreamFailed"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1359,10 +1413,58 @@ export interface components {
             /** @description 版本只增不改，历史作品引用固定版本 */
             version: number;
             name: string;
+            /** @description 面向用户的说明文案，用于技能 chips 的提示 */
+            description?: string;
+            /**
+             * @description 系统提示词。**可选，且当前 BFF 刻意不返回该字段** ——
+             *     它是技能的价值所在，通过公开接口返回等同于把技能包送人。
+             */
             promptTemplate?: string;
             paramsSchema?: {
                 [key: string]: unknown;
             };
+        };
+        LlmUsage: {
+            promptTokens: number;
+            completionTokens: number;
+            /**
+             * @description 思维链消耗的 token（推理模型才有）。**计入计费** —— 实测占总输出
+             *     79%（DeepSeek flash）～93%（Kimi k2.6）。只统计最终答案会严重低估成本。
+             */
+            reasoningTokens: number;
+            totalTokens: number;
+        };
+        PromptEnhanceRequest: {
+            /** @description 用户原始输入。超过 1500 字会被截断，避免把成本打飞 */
+            rawPrompt: string;
+            /**
+             * @description 技能 key（对应 `Skill.key`）。未指定或不存在时**回落 generic** 而非报错 ——
+             *     技能 key 可能因前端缓存而过期，此时不该打断创作。
+             */
+            skillKey?: string;
+            /**
+             * @description 影响提示词侧重（图片重构图与瞬间定格，视频重运镜与动态）
+             * @enum {string}
+             */
+            capability?: "txt2img" | "img2video";
+        };
+        PromptEnhanceResult: {
+            /** @description 增强后的提示词，写入 `GenSnapshot.prompt` */
+            enhanced: string;
+            /** @description 原始输入，便于前端做「还原」与前后对比 */
+            raw: string;
+            skillKey: string;
+            /**
+             * @description 必须与 `skillKey` 一起写入 `Job.skill` / `Asset.skill`。
+             *     只存 `enhanced` 而不存技能版本的话，技能改版后历史作品的「一键同款」
+             *     会还原出与原作不同的提示词 —— 而且是**静默**的。
+             */
+            skillVersion: number;
+            /** @description 实际承载本次调用的 LLM provider */
+            provider: string;
+            model: string;
+            elapsedMs: number;
+            usage: components["schemas"]["LlmUsage"];
         };
         /** @description 【评审补充 F1】分片上传会话。文件直传对象存储，BFF 只签发与登记。 */
         UploadSession: {
@@ -1438,6 +1540,36 @@ export interface components {
          *     这是刻意的：限流发生在业务层，规则比网关层限流更可解释。
          */
         InsufficientCredit: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /**
+         * @description 上游（LLM / 生成 Provider）调用失败。
+         *     响应 `code` 直接给出原因码，便于前端分支处理，例如：
+         *     `LLM_TRUNCATED_BY_TOKEN_LIMIT`（输出被 max_tokens 截断，推理模型常见）、
+         *     `LLM_AUTH_FAILED`、`LLM_RATE_LIMITED`、`LLM_TIMEOUT`、`CONTENT_BLOCKED_BY_PROVIDER`。
+         *     `hint` 字段给出可执行的下一步，前端应直接展示。
+         */
+        UpstreamFailed: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"] & {
+                    /** @description 面向用户的下一步动作，可直接展示 */
+                    hint?: string;
+                };
+            };
+        };
+        /**
+         * @description 依赖未配置（例如 LLM 未配置 API Key）或暂时不可用。
+         *     这是**运营态问题**而非用户操作错误，前端不应提示用户「你操作错了」。
+         */
+        ServiceUnavailable: {
             headers: {
                 [name: string]: unknown;
             };

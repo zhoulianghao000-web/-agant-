@@ -158,6 +158,7 @@ export function reportProviderConfig(cfg: ProviderConfig): ConfigReport {
  * ==========================================================================*/
 
 export interface LlmConfig {
+  /** 当前启用的 provider 名（= `LLM_PROVIDER`） */
   provider: string;
   baseUrl: string;
   apiKey: string;
@@ -174,25 +175,93 @@ export interface LlmConfig {
    *    且 `finish_reason: "length"` —— 这是最容易误判成「模型没返回」的坑。
    */
   maxTokens: number;
+  /**
+   * 采样温度。
+   *
+   * ⚠️ **不能跨 provider 共用默认值**。实测（2026-10-12）Kimi K2 只接受 `1`，
+   *    传 0.7 会直接 400：`invalid temperature: only 1 is allowed for this model`。
+   *    因此温度是 **profile 级**配置，由 `<PROVIDER>_TEMPERATURE` 提供，
+   *    而不是写死在适配器里。
+   */
+  temperature: number;
 }
 
-export function loadLlmConfig(): LlmConfig {
-  const F = '.env.llm';
+/** provider 名 → 该 profile 的环境变量名，如 kimi + API_KEY → KIMI_API_KEY */
+function profileVar(provider: string, suffix: string): string {
+  return `${provider.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_${suffix}`;
+}
+
+const LLM_ENV_FILE = '.env.llm';
+
+function llmEnv(key: string, fallback = ''): string {
+  return env(key, fallback, LLM_ENV_FILE);
+}
+
+/**
+ * 读取指定（默认由 `LLM_PROVIDER` 决定）provider 的配置。
+ *
+ * 采用 `<PROVIDER>_*` 的 profile 命名，而不是一组扁平的 `LLM_*`：
+ * 因为要同时持有多个 Key（DeepSeek 快、Kimi 稳），扁平的 `LLM_API_KEY`
+ * 无法表达「这个 Key 属于谁」，切换 provider 时就得改 Key 本身 —— 那是事故的来源。
+ */
+export function loadLlmConfig(providerName?: string): LlmConfig {
+  const provider = (providerName || llmEnv('LLM_PROVIDER', 'deepseek')).trim();
+
+  const rawTemp = llmEnv(profileVar(provider, 'TEMPERATURE'), '');
+  const temp = Number(rawTemp);
+
   return {
-    provider: env('LLM_PROVIDER', 'deepseek', F),
-    baseUrl: env('LLM_BASE_URL', 'https://api.deepseek.com', F).replace(/\/+$/, ''),
-    apiKey: env('LLM_API_KEY', '', F),
-    model: env('LLM_MODEL', 'deepseek-flash', F),
-    timeoutMs: Number(env('LLM_TIMEOUT_MS', '30000', F)) || 30000,
-    maxTokens: Number(env('LLM_MAX_TOKENS', '2000', F)) || 2000,
+    provider,
+    baseUrl: llmEnv(profileVar(provider, 'BASE_URL'), '').replace(/\/+$/, ''),
+    apiKey: llmEnv(profileVar(provider, 'API_KEY'), ''),
+    model: llmEnv(profileVar(provider, 'MODEL'), ''),
+    // 回落顺序：profile 级 → 全局 LLM_ 级 → 内置默认
+    // 全局级是刻意保留的：超时与输出上限对所有 provider 的语义一致，可以共享；
+    // 而 temperature **不提供全局回落**，因为它跨 provider 的语义不一致（见上）
+    timeoutMs: Number(llmEnv(profileVar(provider, 'TIMEOUT_MS')) || llmEnv('LLM_TIMEOUT_MS', '30000')) || 30000,
+    maxTokens: Number(llmEnv(profileVar(provider, 'MAX_TOKENS')) || llmEnv('LLM_MAX_TOKENS', '2000')) || 2000,
+    temperature: rawTemp !== '' && Number.isFinite(temp) ? temp : 0.8,
   };
+}
+
+export interface LlmProfileSummary {
+  provider: string;
+  configured: boolean;
+  baseUrl: string;
+  model: string;
+  /** 掩码后的 Key，**绝不含明文** */
+  maskedKey: string;
+  isActive: boolean;
+  temperature: number;
+}
+
+/** 供状态接口与 CLI 展示的全部 profile（含未配置的，便于看出「该填哪个」） */
+export function listLlmProfiles(): LlmProfileSummary[] {
+  const active = llmEnv('LLM_PROVIDER', 'deepseek').trim();
+  const names = llmEnv('LLM_PROVIDERS', 'deepseek,kimi')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  return names.map((name) => {
+    const cfg = loadLlmConfig(name);
+    return {
+      provider: name,
+      configured: Boolean(cfg.baseUrl && cfg.apiKey && cfg.model),
+      baseUrl: cfg.baseUrl || '(未配置)',
+      model: cfg.model || '(未配置)',
+      maskedKey: maskKey(cfg.apiKey),
+      isActive: name === active,
+      temperature: cfg.temperature,
+    };
+  });
 }
 
 export function reportLlmConfig(cfg: LlmConfig): ConfigReport {
   const required: Array<[string, string]> = [
-    ['LLM_BASE_URL', cfg.baseUrl],
-    ['LLM_API_KEY', cfg.apiKey],
-    ['LLM_MODEL', cfg.model],
+    [profileVar(cfg.provider, 'BASE_URL'), cfg.baseUrl],
+    [profileVar(cfg.provider, 'API_KEY'), cfg.apiKey],
+    [profileVar(cfg.provider, 'MODEL'), cfg.model],
   ];
   const missing = required.filter(([, v]) => !v).map(([k]) => k);
 
@@ -202,11 +271,11 @@ export function reportLlmConfig(cfg: LlmConfig): ConfigReport {
     missing,
     masked: {
       LLM_PROVIDER: cfg.provider,
-      LLM_BASE_URL: cfg.baseUrl || '(未配置)',
-      LLM_MODEL: cfg.model || '(未配置)',
-      LLM_API_KEY: maskKey(cfg.apiKey),
-      LLM_TIMEOUT_MS: String(cfg.timeoutMs),
-      LLM_MAX_TOKENS: String(cfg.maxTokens),
+      [profileVar(cfg.provider, 'BASE_URL')]: cfg.baseUrl || '(未配置)',
+      [profileVar(cfg.provider, 'MODEL')]: cfg.model || '(未配置)',
+      [profileVar(cfg.provider, 'API_KEY')]: maskKey(cfg.apiKey),
+      [profileVar(cfg.provider, 'TEMPERATURE')]: String(cfg.temperature),
+      [profileVar(cfg.provider, 'MAX_TOKENS')]: String(cfg.maxTokens),
     },
   };
 }

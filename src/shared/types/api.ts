@@ -36,6 +36,9 @@ export type CreditBalance = Schemas['CreditBalance'];
 export type Model = Schemas['Model'];
 export type Skill = Schemas['Skill'];
 export type SkillRef = Schemas['SkillRef'];
+export type PromptEnhanceRequest = Schemas['PromptEnhanceRequest'];
+export type PromptEnhanceResult = Schemas['PromptEnhanceResult'];
+export type LlmUsage = Schemas['LlmUsage'];
 
 // ------------------------------------------------------------------ 枚举
 // 一律从实体上取，而不是重新写一遍字面量联合 ——
@@ -76,4 +79,9 @@ export interface Paged<T> {
 /** 带总数的分页（广场空态判断需要 total === 0） */
 export interface PagedWithTotal<T> extends Paged<T> {
   total: number;
+}
+
+/** 无分页的列表包装（契约在 GET /v1/skills 内联了 `{ items }`，未抽 schema） */
+export interface ItemList<T> {
+  items: T[];
 }
