@@ -46,14 +46,14 @@ npm run verify         # lint + typecheck + test + build（提交前必跑）
 src/
 ├─ app/                 与业务无关的 Shell：路由、ErrorBoundary、Providers、模块注册表
 ├─ features/
-│   ├─ studio/          M1 创作引擎
+│   ├─ studio/          M1 创作引擎（index.tsx 页面 + skills.ts 技能纯逻辑）
 │   ├─ assets/          M2 资产中枢
 │   └─ discover/        M3 灵感广场
 ├─ shared/              唯一允许被 features 依赖的目录
 │   ├─ data/            queryKeys（唯一 key 工厂）· client · sse
 │   ├─ lib/             snapshot（快照比对）· idempotency
 │   ├─ types/           api（从契约生成物再导出）· generated（机器产物，勿手改）
-│   └─ ui/              Card · Pill · EmptyState（Sprint1 补齐 Tab / IconButton / Skeleton）
+│   └─ ui/              Card · Pill · EmptyState · **Chips**（Sprint1 补齐 Tab / IconButton / Skeleton）
 ├─ store/               全局 store（只放会话级小状态）
 └─ styles/              design-tokens.css（Design Token 单点真源）
 ```
@@ -109,9 +109,11 @@ src/
 ## 待办（Sprint1 第一批）
 
 1. ~~用 `openapi-typescript` 从契约生成类型，替换手工镜像~~ → **已完成（2026-10-12）**：契约迁入 `contracts/openapi.yaml`，`npm run contract:types` 生成 `shared/types/generated.ts`，`api.ts` 改为从生成物再导出；CI 增加 `contract:check` 防止契约与类型不同步
-2. 补齐 `shared/ui`：Tab / IconButton / Skeleton
+2. 补齐 `shared/ui`：Tab / IconButton / Skeleton（**Chips 已于 2026-10-12 补齐**）
 3. M1 最小闭环：提交任务 → 进度 → 结果
-4. 把调试台（`../p0-debug-console.html`）的 10 条断言改写为 Playwright e2e
+4. 把调试台的 10 条断言 + **技能链路的 16 条浏览器断言**改写为 Node 版 Playwright e2e。
+   当前那 16 条断言是 Python 脚本（临时验证工具，存于阶段归档的验证证据里）——
+   交叉工具链不适合长期留在仓库，Sprint1 应统一到 Node Playwright
 5. ~~契约修正：SSE 需接受 `?lastEventId=`~~ → **已在契约 v1 中补上**（含原因说明）
 6. 正式 Logo 图形（当前为「霓虹青方块 + 文字」占位字标）
 
@@ -146,6 +148,39 @@ Key 未配置时 BFF **降级到 stub 适配器**并标记 `usingStub: true`，�
 三个路径模板与厂商错误码映射都通过环境变量配置。真实 Provider 定下来后若形态不同
 （例如回调式 / WebSocket 推送），**只改这一个文件**，`providers/types.ts` 的契约与上层业务代码不受影响
 —— 这正是适配层存在的意义。
+
+---
+
+## 技能体系（提示词增强）已接入前端
+
+M1 的「技能 chips」是当前门槛最低的创作入口（三站逆向的结论）。已打通：
+
+```
+GET  /v1/skills           → 渲染 chips（契约端点，不是调试用的 /v1/llm/status）
+POST /v1/prompt/enhance   → 把 enhanced 写回提示词输入框
+                          → 同时记下 skillKey + skillVersion
+提交时 → JobCreateRequest.skillKey / skillVersion（契约里已有这两个字段）
+```
+
+**为什么技能版本必须与提示词一起记**：只存增强后的提示词、不存产出它的技能版本，
+技能改版后历史作品的「一键同款」会还原出与原作不同的提示词 —— 而且是静默的。
+`src/features/studio/skills.ts` 里这条不变量由 11 个用例锁住。
+
+**归因的诚实性**：`editedAfterEnhance` 区分了「增强后原样使用」与「增强后手改」。
+不区分的话，「哪个技能真正带来产出」这个指标就没有意义了。
+
+**纯逻辑与渲染分离**：项目的测试环境是 node（无 jsdom），所以交互无法用组件测试覆盖。
+`skills.ts` 因此只放纯函数（该不该发请求、请求体长什么样、响应如何落快照），
+交互层交给浏览器实测 —— 16 条断言（含真实 LLM 调用）见本阶段归档的验证证据。
+
+### ⚠️ 两个只在真实浏览器里才会暴露的坑（已修）
+
+1. **`Access-Control-Allow-Origin: *` 会让所有请求被拦。**
+   前端 `apiFetch` 带 `credentials: 'include'`，而规范禁止「凭据模式 + 通配来源」，
+   浏览器直接拒绝。BFF 改为**回显 Origin** + `Access-Control-Allow-Credentials: true` + `Vary: Origin`。
+2. **前端无法区分「服务没起」与「被 CORS 拦」。**
+   fetch 在网络层失败只抛 TypeError，浏览器出于安全不告诉脚本原因。
+   所以错误文案如实列出两种可能，而不是猜一个 —— 猜错会把排查方向带偏。
 
 ---
 
