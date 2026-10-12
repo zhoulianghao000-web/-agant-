@@ -25,7 +25,10 @@ npm run verify         # lint + typecheck + test + build（提交前必跑）
 | `npm run dev:staging` | 以 staging 模式本地开发 |
 | `npm run build` | 生产构建（typecheck + vite build） |
 | `npm run build:staging` | 预发构建 |
-| `npm run typecheck` | 仅类型检查（`tsc --noEmit`） |
+| `npm run dev:server` | 启动 BFF 骨架（默认 `127.0.0.1:8787`，热重载） |
+| `npm run start:server` | 同上，不热重载 |
+| `npm run provider:check` | **Provider 接入自检**：配置检查 + 真实连通性测试（退出码 0/1/2/3） |
+| `npm run typecheck` | 仅类型检查（`tsc --noEmit`，覆盖 `src/` 与 `server/`） |
 | `npm run lint` | ESLint，`--max-warnings 0` |
 | `npm run test` | Vitest 单元测试（单次，含契约完整性门禁） |
 | `npm run contract:types` | 从 `contracts/openapi.yaml` 重新生成 `src/shared/types/generated.ts` |
@@ -55,9 +58,13 @@ src/
 └─ styles/              design-tokens.css（Design Token 单点真源）
 ```
 
-仓库根另有 **`contracts/openapi.yaml`** —— 接口契约的唯一真源。它必须在仓库内：
-否则 CI 无法校验契约（跑在仓库里，看不到父目录），`contract:types` 也就无从执行。
-评审发现 F6 已据此闭环。
+仓库根另有：
+
+| 路径 | 说明 |
+|---|---|
+| `contracts/openapi.yaml` | 接口契约唯一真源。**必须在仓库内** —— 否则 CI 无法校验契约（跑在仓库里、看不到父目录），`contract:types` 也就无从执行。评审发现 F6 已据此闭环 |
+| `server/` | BFF 骨架（阶段 0 只做 Provider 接入所需的最小面：health / provider/status / provider/ping，零依赖，只用 `node:http`） |
+| `.env.provider.example` | Provider 配置模板；真实的 `.env.provider` 已被 `.gitignore` 显式忽略（含 API Key） |
 
 **依赖方向单向**：`app → features → shared`。features 之间不得互相 import；跨模块协作只通过路由跳转与 Query 缓存。
 
@@ -107,6 +114,40 @@ src/
 4. 把调试台（`../p0-debug-console.html`）的 10 条断言改写为 Playwright e2e
 5. ~~契约修正：SSE 需接受 `?lastEventId=`~~ → **已在契约 v1 中补上**（含原因说明）
 6. 正式 Logo 图形（当前为「霓虹青方块 + 文字」占位字标）
+
+## Provider 接入（阶段 0 · 任务 0.1 / 0.2）
+
+Key 到手后三步接通：
+
+```bash
+cp .env.provider.example .env.provider   # 1) 复制模板（该文件已被 gitignore，不会提交）
+#          2) 填入 PROVIDER_BASE_URL 与 PROVIDER_API_KEY
+npm run provider:check                   # 3) 自检：真实提交一次最小任务并轮询到终态
+```
+
+退出码：`0` 连通且拿到产物 ｜ `1` 连通失败（已打印厂商返回与排查顺序）｜ `2` 尚未配置 Key（**预期中间态，不是错误**）｜ `3` 被内容审核拦截（属真实终态，需按 0.3 记录口径）
+
+### 安全红线（风险 R13）
+
+- Provider 变量**不带 `VITE_` 前缀**。Vite 会把 `VITE_*` 注入前端 bundle，任何人下载 JS 都能看到 Key。
+- 本仓库是 **PUBLIC**，任何入库的东西等同已公开。`tests/secrets.test.ts` 在 CI 中拦截这类误用（含 `.gitignore` 是否覆盖 `.env.provider` 的断言——`.env` 与 `.env.*.local` 两条规则**都匹配不到** `.env.provider`）。
+- 所有输出（CLI、`/v1/provider/status`、启动日志）只显示 Key 的**末 4 位与长度**。
+
+### 没有 Key 也能开发
+
+Key 未配置时 BFF **降级到 stub 适配器**并标记 `usingStub: true`，而不是启动失败。
+`POST /v1/provider/ping` 会真实走完 submit → poll → 拿到产物，用于先把
+「提交 → 进度 → 落库 → 一键同款」整条链路跑通。结果始终带 `mockResult: true`，
+避免 stub 结果被当成真实联调结论。
+
+### 目前是「通用形态」适配器
+
+`server/providers/http-generic.ts` 按最通用的形态实现（提交返回 jobId + 轮询取状态），
+三个路径模板与厂商错误码映射都通过环境变量配置。真实 Provider 定下来后若形态不同
+（例如回调式 / WebSocket 推送），**只改这一个文件**，`providers/types.ts` 的契约与上层业务代码不受影响
+—— 这正是适配层存在的意义。
+
+---
 
 ## 环境与边界
 

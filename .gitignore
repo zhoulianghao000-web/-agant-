@@ -17,6 +17,13 @@ dist-ssr/
 .env.staging
 .env.production
 
+# Provider 配置 —— **含 API Key，绝不能入库**（风险 R13）
+# 注意：`.env` 与 `.env.*.local` 这两条都匹配不到 `.env.provider`，
+# 必须显式声明，否则 Key 文件会被静默提交。
+.env.provider
+.env.provider.*
+!.env.provider.example
+
 # 编辑器与系统
 .vscode/*
 !.vscode/extensions.json
