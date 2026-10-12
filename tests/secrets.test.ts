@@ -52,37 +52,41 @@ describe('密钥不得进入前端 bundle', () => {
   });
 });
 
-describe('.gitignore 必须覆盖 Provider 配置文件', () => {
+describe('.gitignore 必须覆盖所有含密钥的配置文件', () => {
   const gitignore = readFileSync(join(APP_ROOT, '.gitignore'), 'utf8');
   const lines = gitignore.split(/\r?\n/).map((l) => l.trim());
 
-  it('显式忽略 .env.provider', () => {
-    // 这条不能想当然：`.env` 与 `.env.*.local` 两条规则**都匹配不到** `.env.provider`，
-    // 不显式声明就会把 Key 文件静默提交。
-    expect(lines).toContain('.env.provider');
-  });
-
-  it('保留 .env.provider.example 可入库', () => {
-    expect(lines).toContain('!.env.provider.example');
-  });
-
-  it('.env.provider.example 里没有任何真实密钥值', () => {
-    const example = readFileSync(join(APP_ROOT, '.env.provider.example'), 'utf8');
-    const assignments = example
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#') && l.includes('='));
-
-    const suspicious = assignments.filter((l) => {
-      const value = l.slice(l.indexOf('=') + 1).replace(/^["']|["']$/g, '');
-      if (!value) return false;
-      // 占位值必须是短的或明显的示例值；长随机串说明有人把真 Key 填进了模板
-      if (value.length > 40 && !value.startsWith('{')) return true;
-      return /^(sk|pk|ak)-[A-Za-z0-9]{8,}/.test(value);
+  // 两份配置各含一个 Key，且互不覆盖，必须**逐个**显式声明。
+  // 这条不能想当然：`.env` 与 `.env.*.local` 两条规则都匹配不到它们，
+  // 不显式声明就会把 Key 文件静默提交到 PUBLIC 仓库。
+  // 这里用循环而不是复制两遍，是为了让「将来再加一份配置」时漏掉一个就会红。
+  for (const name of ['.env.provider', '.env.llm']) {
+    it(`显式忽略 ${name}`, () => {
+      expect(lines).toContain(name);
     });
 
-    expect(suspicious, `模板中出现疑似真实密钥：\n${suspicious.join('\n')}`).toEqual([]);
-  });
+    it(`保留 ${name}.example 可入库`, () => {
+      expect(lines).toContain(`!${name}.example`);
+    });
+
+    it(`${name}.example 里没有任何真实密钥值`, () => {
+      const example = readFileSync(join(APP_ROOT, `${name}.example`), 'utf8');
+      const assignments = example
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#') && l.includes('='));
+
+      const suspicious = assignments.filter((l) => {
+        const value = l.slice(l.indexOf('=') + 1).replace(/^["']|["']$/g, '');
+        if (!value) return false;
+        // 占位值必须是短的或明显的示例值；长随机串说明有人把真 Key 填进了模板
+        if (value.length > 40 && !value.startsWith('{')) return true;
+        return /^(sk|pk|ak)-[A-Za-z0-9]{8,}/.test(value);
+      });
+
+      expect(suspicious, `模板中出现疑似真实密钥：\n${suspicious.join('\n')}`).toEqual([]);
+    });
+  }
 });
 
 describe('代码中不得硬编码密钥字面量', () => {

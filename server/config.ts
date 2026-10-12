@@ -31,8 +31,6 @@ export interface ProviderConfig {
   errorMap: Record<string, string>;
 }
 
-const ENV_FILE = resolve(process.cwd(), '.env.provider');
-
 /** 极简 .env 解析：KEY=VALUE，忽略注释与空行，支持两侧引号 */
 function parseEnvFile(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -54,20 +52,28 @@ function parseEnvFile(text: string): Record<string, string> {
   return out;
 }
 
-let fileEnv: Record<string, string> | null = null;
+const ENV_CACHE = new Map<string, Record<string, string>>();
 
-function fromEnvFile(key: string): string {
-  if (fileEnv === null) {
-    fileEnv = existsSync(ENV_FILE) ? parseEnvFile(readFileSync(ENV_FILE, 'utf8')) : {};
-  }
-  return fileEnv[key] ?? '';
+function loadEnvFile(fileName: string): Record<string, string> {
+  const cached = ENV_CACHE.get(fileName);
+  if (cached) return cached;
+  const full = resolve(process.cwd(), fileName);
+  const parsed = existsSync(full) ? parseEnvFile(readFileSync(full, 'utf8')) : {};
+  ENV_CACHE.set(fileName, parsed);
+  return parsed;
 }
 
-/** 优先级：真实环境变量 > .env.provider > 默认值 */
-function env(key: string, fallback = ''): string {
+/**
+ * 优先级：真实环境变量 > 指定的 .env 文件 > 默认值
+ *
+ * `file` 参数是刻意的：生成能力（`.env.provider`）与 LLM（`.env.llm`）是**两套独立配置**。
+ * 它们的 Key、配额、计费口径、限流策略、失败语义都不同 —— 混用会导致
+ * 「换一个语言模型」会动到生成链路、「生成超时」污染 LLM 的错误统计。
+ */
+function env(key: string, fallback = '', file = '.env.provider'): string {
   const real = process.env[key];
   if (real !== undefined && real !== '') return real;
-  return fromEnvFile(key) || fallback;
+  return loadEnvFile(file)[key] || fallback;
 }
 
 export function loadProviderConfig(): ProviderConfig {
@@ -141,6 +147,66 @@ export function reportProviderConfig(cfg: ProviderConfig): ConfigReport {
       PROVIDER_SUBMIT_PATH: cfg.submitPath,
       PROVIDER_POLL_PATH: cfg.pollPath,
       PROVIDER_CANCEL_PATH: cfg.cancelPath,
+    },
+  };
+}
+
+/* ============================================================================
+ * LLM 配置（提示词增强 / 技能体系的后端）
+ *
+ * 与 Provider 配置分离的理由见上方 `env()` 的注释。
+ * ==========================================================================*/
+
+export interface LlmConfig {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  /** 单次请求超时。提示词增强是**同步交互**（用户在前端等着），
+   *  所以远小于生成任务的超时 —— 生成是异步的，等几分钟无所谓 */
+  timeoutMs: number;
+  /**
+   * 输出上限（token）。
+   *
+   * ⚠️ 推理模型下这个值必须包含**思维链**消耗：实测 `deepseek-flash`
+   *    回答「一只猫」时 reasoning_tokens=252、最终答案仅 61 token。
+   *    若把 maxTokens 设成 300，预算会被思维链吃光，`content` 返回**空字符串**
+   *    且 `finish_reason: "length"` —— 这是最容易误判成「模型没返回」的坑。
+   */
+  maxTokens: number;
+}
+
+export function loadLlmConfig(): LlmConfig {
+  const F = '.env.llm';
+  return {
+    provider: env('LLM_PROVIDER', 'deepseek', F),
+    baseUrl: env('LLM_BASE_URL', 'https://api.deepseek.com', F).replace(/\/+$/, ''),
+    apiKey: env('LLM_API_KEY', '', F),
+    model: env('LLM_MODEL', 'deepseek-flash', F),
+    timeoutMs: Number(env('LLM_TIMEOUT_MS', '30000', F)) || 30000,
+    maxTokens: Number(env('LLM_MAX_TOKENS', '2000', F)) || 2000,
+  };
+}
+
+export function reportLlmConfig(cfg: LlmConfig): ConfigReport {
+  const required: Array<[string, string]> = [
+    ['LLM_BASE_URL', cfg.baseUrl],
+    ['LLM_API_KEY', cfg.apiKey],
+    ['LLM_MODEL', cfg.model],
+  ];
+  const missing = required.filter(([, v]) => !v).map(([k]) => k);
+
+  return {
+    configured: missing.length === 0,
+    present: required.filter(([, v]) => !!v).map(([k]) => k),
+    missing,
+    masked: {
+      LLM_PROVIDER: cfg.provider,
+      LLM_BASE_URL: cfg.baseUrl || '(未配置)',
+      LLM_MODEL: cfg.model || '(未配置)',
+      LLM_API_KEY: maskKey(cfg.apiKey),
+      LLM_TIMEOUT_MS: String(cfg.timeoutMs),
+      LLM_MAX_TOKENS: String(cfg.maxTokens),
     },
   };
 }
