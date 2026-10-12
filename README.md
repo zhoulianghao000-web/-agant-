@@ -150,6 +150,38 @@ Key 未配置时 BFF **降级到 stub 适配器**并标记 `usingStub: true`，�
 「提交 → 进度 → 落库 → 一键同款」整条链路跑通。结果始终带 `mockResult: true`，
 避免 stub 结果被当成真实联调结论。
 
+### stub 是「可按需驱动的模拟器」，不是随机故障源
+
+在提示词里嵌入 `[stub:<场景>]` 即可精确驱动到对应路径。思路同 Stripe 的测试卡号：
+**约定的触发值**。标记只在 stub 下被解析，切到真 adapter 后就是一段普通文本。
+
+| 标记 | 阶段 | 结果 |
+|---|---|---|
+| （无） | — | 正常成功 |
+| `[stub:slow]` | — | 成功但耗时 ×10 |
+| `[stub:blocked]` | poll | `blocked` 终态 → `CONTENT_BLOCKED_BY_PROVIDER` |
+| `[stub:failed]` | poll | `failed` → `PROVIDER_ERROR`（不可重试） |
+| `[stub:unavailable]` | poll | `failed` → `PROVIDER_UNAVAILABLE`（可重试） |
+| `[stub:timeout]` | poll | **永不终态** → 用于验证调用方的本地超时兜底 |
+| `[stub:ratelimited]` | **submit** | 同步拒绝 → `RATE_LIMITED` |
+| `[stub:invalid]` | **submit** | 同步拒绝 → `INVALID_ARGUMENT` |
+
+`GET /v1/provider/status` 在 `usingStub` 时会返回 `stubScenarios`（含 `stage`），
+所以这套触发值是**可发现**的，不需要翻代码。
+
+```bash
+curl -X POST http://127.0.0.1:8787/v1/provider/ping -H 'Content-Type: application/json' \
+  -d '{"timeoutMs":60000}'          # 正常路径
+```
+
+**为什么非要区分 `stage`**：执行包 §5 要求确认「内容拦截发生在同步提交阶段还是异步终态」——
+前者必须把错误码从异步 `job.errorCode` 提前到 HTTP 4xx、**契约要改**；后者不用改。
+两者的「结果」都是失败，靠 `outcome` 区分不出来。这个判据现在是可断言的了。
+
+> ⚠️ `STUB_FAIL_RATE` / `STUB_BLOCK_RATE` 仍然存在，但**默认 0 且不应用于复现故障**：
+> 一旦非 0，测试就不再确定，而 flaky 的测试最终会被跳过 —— 等于没有。
+> 它们只用于压测/长稳。按需复现请用标记。
+
 ### 目前是「通用形态」适配器
 
 `server/providers/http-generic.ts` 按最通用的形态实现（提交返回 jobId + 轮询取状态），

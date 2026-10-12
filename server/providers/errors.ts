@@ -27,14 +27,20 @@ export const DEFAULT_RULES: readonly NormalizeRule[] = [
       /content|policy|safety|moderation|nsfw|violat|forbidden_content|敏感|违规|审核|涉黄|涉政|不适宜|风险/i,
     code: 'CONTENT_BLOCKED_BY_PROVIDER',
   },
-  { match: /timeout|timed?\s?out|deadline|etimedout|504|超时/i, code: 'PROVIDER_TIMEOUT' },
-  { match: /rate|throttl|too\s?many|quota|concurren|429|限流|频率|配额/i, code: 'RATE_LIMITED' },
+  // ⚠️ 下面三处的分隔符写成 `[\s_-]?` 而不是 `\s?` —— 这是写 stub 模拟器时发现的真实缺陷：
+  //    各家的错误码普遍用**下划线**（`too_many_requests` / `bad_request` / `timed_out`），
+  //    而 `\s?` 只允许「零个或一个空白」，匹配不到下划线。
+  //    后果很具体：`too_many_requests` 会一路掉到兜底的 PROVIDER_ERROR，
+  //    而 PROVIDER_ERROR 是**不可重试**的 —— 于是一次本可自动重试的限流，
+  //    变成给用户报「未知错误」且不再重试。
+  { match: /timeout|timed?[\s_-]?out|deadline|etimedout|504|超时/i, code: 'PROVIDER_TIMEOUT' },
+  { match: /rate|throttl|too[\s_-]?many|quota|concurren|exhaust|429|限流|频率|配额/i, code: 'RATE_LIMITED' },
   {
     match: /unavailable|overload|capacity|maintenance|busy|502|503|不可用|繁忙|维护|过载/i,
     code: 'PROVIDER_UNAVAILABLE',
   },
   {
-    match: /invalid|bad\s?request|param|unsupported|malformed|400|422|参数|非法|不支持/i,
+    match: /invalid|bad[\s_-]?request|param|unsupported|malformed|400|422|参数|非法|不支持/i,
     code: 'INVALID_ARGUMENT',
   },
 ];
