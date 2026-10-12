@@ -79,7 +79,7 @@ describe('normalizeChatCompletion · 两家响应结构一致（共用适配器�
     it(`${name}：思维链计入 completion_tokens 与计费`, () => {
       const r = normalizeChatCompletion(raw);
       expect(r.usage.reasoningTokens).toBeGreaterThan(0);
-      // 实测思维链占输出 79%（DeepSeek）～93%（Kimi），只数最终答案会严重低估成本
+      // 实测思维链占比波动大（DeepSeek 41%–88%、Kimi 72%–79%），只数最终答案会严重低估成本
       expect(r.usage.reasoningTokens / r.usage.completionTokens).toBeGreaterThan(0.7);
       expect(r.usage.reasoningTokens).toBeLessThanOrEqual(r.usage.completionTokens);
     });

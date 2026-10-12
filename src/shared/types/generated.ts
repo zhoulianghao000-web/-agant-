@@ -1428,8 +1428,10 @@ export interface components {
             promptTokens: number;
             completionTokens: number;
             /**
-             * @description 思维链消耗的 token（推理模型才有）。**计入计费** —— 实测占总输出
-             *     79%（DeepSeek flash）～93%（Kimi k2.6）。只统计最终答案会严重低估成本。
+             * @description 思维链消耗的 token（推理模型才有）。**计入计费** —— 只统计最终答案会严重低估成本。
+             *
+             *     实测占比**波动很大，不能当固定系数估算单价**：
+             *     Kimi k2.6 为 72%–79%（较稳定），DeepSeek flash 为 41%–88%（波动大）。
              */
             reasoningTokens: number;
             totalTokens: number;
