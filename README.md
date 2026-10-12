@@ -1,8 +1,15 @@
 # 神笔·画 · Web 前端
 
-> 品牌：**神笔·画**（书写规范见 `../阶段0-DesignToken-v1.md` §1.4）
+> 品牌：**神笔·画**（书写规范见《阶段0-DesignToken-v1》§1.4）
 > 阶段：**0（骨架就绪）** ｜ 对应实施计划任务 **0.6** ｜ 目标形态：**桌面浏览器**（不考虑移动端）
-> 上游文档：`../三合一实施计划-v1.2.md`、`../三合一AIGC平台架构设计-v1.2.md`、`../阶段0-前端约定-v1.md`
+
+> **上游文档不在本仓库内。** 架构设计、实施计划与阶段文档存于项目归档目录：
+> `三合一项目/00-总览/`（架构设计、实施计划、决策记录）与
+> `三合一项目/01-阶段0-启动准备/01-交付文档/`（各阶段规范）。本仓库只放可运行的代码。
+>
+> 这里原先写的是 `../阶段0-DesignToken-v1.md` 这类**相对链接**。
+> 它们**在 GitHub 上是断的** —— 仓库被 clone 后没有父目录，`../` 无处可指，
+> 也就是说引用从推送那一刻起就失效，只是本地开发时看不出来。2026-10-12 改为说明文字。
 
 ---
 
@@ -28,6 +35,7 @@ npm run verify         # lint + typecheck + test + build（提交前必跑）
 | `npm run dev:server` | 启动 BFF 骨架（默认 `127.0.0.1:8787`，热重载） |
 | `npm run start:server` | 同上，不热重载 |
 | `npm run provider:check` | **Provider 接入自检**：配置检查 + 真实连通性测试（退出码 0/1/2/3） |
+| `npm run provider:audit` | **审核口径实测（任务 0.3）**：跑 10 条用例并产出可替换执行包 §5 空表的报告。默认 dry-run，需 `-- --yes` 才真正提交 |
 | `npm run typecheck` | 仅类型检查（`tsc --noEmit`，覆盖 `src/` 与 `server/`） |
 | `npm run lint` | ESLint，`--max-warnings 0` |
 | `npm run test` | Vitest 单元测试（单次，含契约完整性门禁） |
@@ -94,7 +102,7 @@ src/
 | staging | `npm run build:staging` | `.env.staging`（**不入库**） | CI Variable `VITE_API_BASE_URL_STAGING` |
 | prod | `npm run build` | `.env.production`（**不入库**） | CI Variable `VITE_API_BASE_URL_PROD` |
 
-**红线**：`VITE_*` 会被打进前端 bundle，任何人可见。**模型 Provider 的 API Key 只存在于 BFF 侧**，绝不进前端（对应风险 R13，见 `../阶段0-Provider接入执行包-v1.md` §4）。
+**红线**：`VITE_*` 会被打进前端 bundle，任何人可见。**模型 Provider 的 API Key 只存在于 BFF 侧**，绝不进前端（对应风险 R13，见《阶段0-Provider接入执行包-v1》§4）。
 
 ## 分支策略
 
@@ -148,6 +156,40 @@ Key 未配置时 BFF **降级到 stub 适配器**并标记 `usingStub: true`，�
 三个路径模板与厂商错误码映射都通过环境变量配置。真实 Provider 定下来后若形态不同
 （例如回调式 / WebSocket 推送），**只改这一个文件**，`providers/types.ts` 的契约与上层业务代码不受影响
 —— 这正是适配层存在的意义。
+
+---
+
+## 审核口径实测（任务 0.3）
+
+```bash
+npm run provider:audit                          # dry-run：10 条用例计划 + 预计消耗 + 哪些会跳过
+npm run provider:audit -- --yes                 # 真正执行（⚠️ 消耗真实额度）
+npm run provider:audit -- --yes --only 1,2,6    # 只跑指定用例
+```
+
+产出落在 `artifacts/provider-audit/`（**已 gitignore**；需长期留存时把报告与原始 JSON
+归档到项目归档目录的 `03-验证证据/`）：一份可直接替换 `阶段0-Provider接入执行包-v1 §5`
+空表的 Markdown 报告，加一份原始 JSON。原始返回体**已脱敏**。
+
+### 两条刻意的设计
+
+**1. 脚本不预置任何违规测试内容。** 用例 2/3/4/5/8 涉及违规题材、真人肖像、商标，
+必须由操作者按当地法律与平台条款通过 `AUDIT_*` 变量提供（可写在 `.env.provider` 里），
+未提供则标记为「跳过」。
+—— 一个内容安全测试工具自己产出违规内容，是最糟的自相矛盾。
+
+**2. 默认 dry-run。** 10 次提交（并发用例一次 8 路）会消耗真实额度。
+一个「跑一下试试」的按钮配上真额度，迟早会被误触。
+
+### 它会直接回答「契约要不要改」
+
+执行包要求确认：**若内容拦截发生在同步提交阶段，错误码须从异步 `job.errorCode`
+提前到 HTTP 4xx，契约必须据此修正。** 报告会给出明确结论。
+
+判据是观测记录的 `stage` 字段（`submit` / `poll`），**不是** `outcome` ——
+两种拦截的 `outcome` 都是 `blocked`，但对契约的影响完全相反。
+（这是本模块第一版写错的地方：用 `outcome` 判阶段会把结论判反，
+已有测试 `拦截发生在同步提交阶段 → 明确要求修正契约` 守住。）
 
 ---
 

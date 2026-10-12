@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 const APP_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(APP_ROOT, 'src');
 const SERVER = join(APP_ROOT, 'server');
+const TESTS = join(APP_ROOT, 'tests');
 
 function walk(dir: string, acc: string[] = []): string[] {
   if (!existsSync(dir)) return acc;
@@ -34,6 +35,15 @@ describe('密钥不得进入前端 bundle', () => {
     expect(files.length).toBeGreaterThan(0);
     expect(files.some((f) => f.endsWith('client.ts'))).toBe(true);
     expect(files.some((f) => f.endsWith('config.ts'))).toBe(true);
+  });
+
+  it('硬编码密钥护栏必须覆盖 tests/（曾经漏过：护栏自己失职）', () => {
+    // 这条不测被扫的文件，而是测「护栏的扫描范围本身」——
+    // 一次真实的泄漏就是从「范围少了一个目录」开始的，所以范围也要有断言。
+    const scanned = [...walk(SRC), ...walk(SERVER), ...walk(TESTS)].map((f) => relative(APP_ROOT, f));
+    expect(scanned.some((f) => f.startsWith('tests\\') || f.startsWith('tests/'))).toBe(true);
+    expect(scanned.some((f) => f.startsWith('src\\') || f.startsWith('src/'))).toBe(true);
+    expect(scanned.some((f) => f.startsWith('server\\') || f.startsWith('server/'))).toBe(true);
   });
 
   it('src/ 中不存在任何 VITE_ 前缀的密钥类变量', () => {
@@ -90,11 +100,16 @@ describe('.gitignore 必须覆盖所有含密钥的配置文件', () => {
 });
 
 describe('代码中不得硬编码密钥字面量', () => {
-  it('src/ 与 server/ 中不存在密钥形态的字符串', () => {
+  it('src/、server/ 与 tests/ 中不存在密钥形态的字符串', () => {
+    // ⚠️ 必须包含 tests/ —— 2026-10-12 真的漏过一次：
+    //    为了测试脱敏，我在测试文件里写了一个**真实 Key** 当作样本，
+    //    而这条护栏当时只扫 src/ 与 server/，于是一路绿到即将推送到 PUBLIC 仓库。
+    //    最后是归档脚本的「密钥形态」扫描把它拦下的，不是这条护栏 —— 那是护栏的失职。
+    //    测试文件同样会入库、同样会被任何人 clone 下来，没有理由豁免。
     const pattern = /['"`](sk|pk|ak)-[A-Za-z0-9_-]{16,}['"`]/;
     const hits: string[] = [];
 
-    for (const file of [...walk(SRC), ...walk(SERVER)]) {
+    for (const file of [...walk(SRC), ...walk(SERVER), ...walk(TESTS)]) {
       readFileSync(file, 'utf8')
         .split(/\r?\n/)
         .forEach((lineText, i) => {
