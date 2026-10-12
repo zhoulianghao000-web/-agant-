@@ -54,7 +54,14 @@ function parseEnvFile(text: string): Record<string, string> {
 
 const ENV_CACHE = new Map<string, Record<string, string>>();
 
-function loadEnvFile(fileName: string): Record<string, string> {
+/**
+ * 读取一个 .env 文件（带缓存）。
+ *
+ * 导出是给 `server/audit` 用的：审核实测需要操作者提供测试素材（违规文本、
+ * 参考图 URL），这些既不该硬编码进代码，也不方便每次在命令行里传长文本，
+ * 放在 `.env.provider` 里最顺手 —— 而复用同一套解析能避免出现第二份 .env 解析逻辑。
+ */
+export function loadEnvFile(fileName: string): Record<string, string> {
   const cached = ENV_CACHE.get(fileName);
   if (cached) return cached;
   const full = resolve(process.cwd(), fileName);

@@ -126,7 +126,11 @@ describe('密钥掩码与配置自检（风险 R13）', () => {
     id: 'test',
     displayName: 'test',
     baseUrl: 'https://api.example.com',
-    apiKey: 'sk-abcdefghijklmnopqrstuvwxyz123456',
+    // 夹具刻意写成明显不像密钥的形态（无 sk- 前缀、带连字符）：
+    // 归档时的密钥扫描按「sk- 后跟 20+ 位」这样的**形态**来查，
+    // 若夹具长得像真密钥，扫描就会命中它 —— 那是误报，而正确的修法是
+    // 让夹具不像密钥，不是放宽扫描器（放宽会让真密钥漏过去）。
+    apiKey: 'test-fixture-not-a-real-key-9876543210',
     submitPath: '/s',
     pollPath: '/p/{id}',
     cancelPath: '/c/{id}',
@@ -139,7 +143,7 @@ describe('密钥掩码与配置自检（风险 R13）', () => {
     const masked = maskKey(base.apiKey);
     expect(masked).not.toContain(base.apiKey);
     // 也不得泄漏除末 4 位以外的任何片段
-    expect(masked).not.toContain('abcdefghij');
+    expect(masked).not.toContain('fixture-not-a-real');
     expect(masked).toContain(base.apiKey.slice(-4));
     expect(masked).toContain(String(base.apiKey.length));
   });
