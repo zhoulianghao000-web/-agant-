@@ -22,6 +22,15 @@ describe('normalizeError · 平台错误码判定', () => {
     ['服务不可用 503', { code: '503' }, 'PROVIDER_UNAVAILABLE'],
     ['参数非法', { code: 'invalid_request', message: 'unsupported aspect ratio' }, 'INVALID_ARGUMENT'],
     ['参数非法（中文）', { message: '参数不支持' }, 'INVALID_ARGUMENT'],
+    // ⚠️ 以下几项是写 stub 模拟器时才发现的**真实归一缺口**：
+    //    各家错误码普遍用下划线（too_many_requests / bad_request / timed_out），
+    //    而规则原写 `too\s?many` —— `\s?` 只允许空白，匹配不到下划线。
+    //    于是它们会掉到兜底的 PROVIDER_ERROR，而 PROVIDER_ERROR **不可重试**：
+    //    一次本可自动重试的限流，就变成给用户报「未知错误」且不再重试。
+    ['下划线 too_many_requests（Google / Stripe / GitHub 通用）', { code: 'too_many_requests' }, 'RATE_LIMITED'],
+    ['下划线 RESOURCE_EXHAUSTED（gRPC 的配额耗尽）', { code: 'RESOURCE_EXHAUSTED' }, 'RATE_LIMITED'],
+    ['下划线 bad_request', { code: 'bad_request' }, 'INVALID_ARGUMENT'],
+    ['下划线 timed_out', { code: 'timed_out' }, 'PROVIDER_TIMEOUT'],
     ['未知错误兜底', { code: 'internal_error' }, 'PROVIDER_ERROR'],
   ];
 

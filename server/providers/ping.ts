@@ -31,7 +31,29 @@ export interface PingResult {
   mockResult: boolean;
 }
 
-export async function providerPing(timeoutMs = 60000, pollIntervalMs = 1000): Promise<PingResult> {
+/** 默认探针提示词：刻意是一句与业务无关的最小输入 */
+const DEFAULT_PROBE_PROMPT = 'connectivity probe: a single grey square on white background';
+
+export interface PingOptions {
+  /**
+   * 覆盖探针提示词。
+   *
+   * ⚠️ **只在 stub 下允许生效** —— 判断由调用方（HTTP handler / CLI）负责，
+   *    因为「该不该允许」是调用场景的属性，不是自测逻辑的属性。
+   *    真实 Provider 下这个参数等于「花真钱跑一个任意提示词」，
+   *    不该开在自检接口上。
+   *
+   * 它的用途是让前端的失败态 UI 可被驱动：把 `[stub:blocked]` 之类
+   * 嵌进提示词，就能从真实 HTTP 入口复现「内容被拦截」这条链路。
+   */
+  prompt?: string;
+}
+
+export async function providerPing(
+  timeoutMs = 60000,
+  pollIntervalMs = 1000,
+  options: PingOptions = {},
+): Promise<PingResult> {
   const { adapter, usingStub } = resolveProvider();
   const steps: PingStep[] = [];
   const t0 = Date.now();
@@ -46,7 +68,7 @@ export async function providerPing(timeoutMs = 60000, pollIntervalMs = 1000): Pr
     const submitted = await adapter.submit({
       capability: 'txt2img',
       modelKey: 'txt2img-p0',
-      prompt: 'connectivity probe: a single grey square on white background',
+      prompt: options.prompt ?? DEFAULT_PROBE_PROMPT,
       seed: 42,
     });
     steps.push({ step: 'submit', ok: true, detail: `受理成功，providerJobId=${submitted.providerJobId}` });

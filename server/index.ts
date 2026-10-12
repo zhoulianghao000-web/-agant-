@@ -18,6 +18,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto';
 import { resolveProvider, MODEL_REGISTRY } from './providers/registry';
 import { providerPing } from './providers/ping';
+import { STUB_SCENARIOS } from './providers/stub';
 import { listLlmProfiles, loadLlmConfig, reportLlmConfig } from './config';
 import { resolveLlm } from './llm/openai-compatible';
 import { enhancePrompt, listSkills } from './llm/prompt-enhance';
@@ -110,6 +111,24 @@ const server = createServer((req, res) => {
           adapter: { id: adapter.id, displayName: adapter.displayName, requiresKey: adapter.requiresKey },
           capabilities: adapter.capabilities(),
           models: MODEL_REGISTRY,
+          // 仅 stub 下返回。触发值必须**可发现** ——
+          // 否则等于埋了一个没人知道的开关，等价于没有这个能力。
+          // 真实 adapter 下这些标记毫无意义，故不返回，避免被误当成真实能力。
+          ...(usingStub
+            ? {
+                stubScenarios: STUB_SCENARIOS.map((s) => ({
+                  marker: `[stub:${s.scenario}]`,
+                  // stage 是关键字段：submit = 同步拒绝（契约需补 4xx）；
+                  // poll = 异步终态（走 job.errorCode，契约不用改）
+                  stage: s.stage,
+                  terminal: s.terminal ?? null,
+                  description: s.description,
+                })),
+                stubHint:
+                  '把 marker 嵌进提示词即可精确驱动到该路径，例如「海岸线日出 [stub:blocked]」。' +
+                  'stage=submit 表示提交阶段同步拒绝，stage=poll 表示异步终态。',
+              }
+            : {}),
           hint: report.configured
             ? '配置完整，可运行 POST /v1/provider/ping 做真实连通性自测。'
             : '尚未配置 Key，当前为 stub。请在 app/.env.provider 填入 PROVIDER_BASE_URL 与 PROVIDER_API_KEY。',
@@ -118,9 +137,26 @@ const server = createServer((req, res) => {
       }
 
       if (method === 'POST' && path === '/v1/provider/ping') {
-        const body = (await readBody(req)) as { timeoutMs?: number } | null;
+        const body = (await readBody(req)) as { timeoutMs?: number; prompt?: string } | null;
         const timeoutMs = Math.min(120000, Math.max(5000, Number(body?.timeoutMs) || 60000));
-        const result = await providerPing(timeoutMs);
+
+        // 自定义提示词**只在 stub 下生效**：真实 Provider 下这等于花真钱跑任意提示词，
+        // 不该开在自检接口上。被忽略时明确说出来，而不是静默丢弃 —— 静默丢弃会让人
+        // 以为「传了没反应」是 bug。
+        const wantsPrompt = typeof body?.prompt === 'string' && body.prompt.trim() !== '';
+        const stubMode = resolveProvider().usingStub;
+        const result = await providerPing(
+          timeoutMs,
+          1000,
+          wantsPrompt && stubMode ? { prompt: body?.prompt as string } : {},
+        );
+        if (wantsPrompt && !stubMode) {
+          result.steps.unshift({
+            step: 'adapter',
+            ok: true,
+            detail: '已忽略自定义 prompt：它仅在 stub 下生效（真实 Provider 下会消耗额度）',
+          });
+        }
         sendJson(res, result.ok ? 200 : 502, result);
         return;
       }
