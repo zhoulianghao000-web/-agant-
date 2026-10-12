@@ -15,6 +15,7 @@
     "dev:server": "tsx watch server/index.ts",
     "start:server": "tsx server/index.ts",
     "provider:check": "tsx server/cli/provider-check.ts",
+    "llm:check": "tsx server/cli/llm-check.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint . --ext .ts,.tsx --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",

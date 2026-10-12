@@ -18,6 +18,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto';
 import { resolveProvider, MODEL_REGISTRY } from './providers/registry';
 import { providerPing } from './providers/ping';
+import { loadLlmConfig, reportLlmConfig } from './config';
+import { resolveLlm } from './llm/deepseek';
+import { enhancePrompt, PROMPT_SKILLS } from './llm/prompt-enhance';
+import { LlmError } from './llm/types';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? '127.0.0.1';
@@ -109,10 +113,71 @@ const server = createServer((req, res) => {
         return;
       }
 
+      if (method === 'GET' && path === '/v1/llm/status') {
+        const cfg = loadLlmConfig();
+        const report = reportLlmConfig(cfg);
+        sendJson(res, 200, {
+          configured: report.configured,
+          missing: report.missing,
+          masked: report.masked,
+          adapter: resolveLlm().describe(),
+          skills: PROMPT_SKILLS.map((s) => ({
+            id: s.id,
+            version: s.version,
+            name: s.name,
+            description: s.description,
+          })),
+          hint: report.configured
+            ? '可调用 POST /v1/prompt/enhance 做提示词增强。'
+            : '尚未配置 LLM。请在 app/.env.llm 填入 LLM_API_KEY，模板见 .env.llm.example。',
+        });
+        return;
+      }
+
+      if (method === 'POST' && path === '/v1/prompt/enhance') {
+        const body = (await readBody(req)) as {
+          rawPrompt?: string;
+          skillId?: string;
+          capability?: 'txt2img' | 'img2video';
+          includeReasoning?: boolean;
+        } | null;
+
+        const rawPrompt = (body?.rawPrompt ?? '').trim();
+        if (!rawPrompt) {
+          sendJson(res, 400, { code: 'INVALID_ARGUMENT', message: 'rawPrompt 不能为空' });
+          return;
+        }
+
+        try {
+          const result = await enhancePrompt(
+            { rawPrompt, skillId: body?.skillId, capability: body?.capability },
+            { includeReasoning: body?.includeReasoning === true },
+          );
+          sendJson(res, 200, result);
+        } catch (err) {
+          const e = err instanceof LlmError ? err : null;
+          // 未配置 → 503（服务不可用，且是运营态问题）；其余 → 502（上游调用失败）
+          const status = e?.code === 'LLM_NOT_CONFIGURED' ? 503 : 502;
+          console.warn(`[${requestId}] 提示词增强失败：${e ? `[${e.code}] ${e.message}` : String(err)}`);
+          sendJson(res, status, {
+            code: e?.code ?? 'LLM_UNAVAILABLE',
+            message: err instanceof Error ? err.message : String(err),
+            hint: e?.hint,
+          });
+        }
+        return;
+      }
+
       sendJson(res, 404, {
         code: 'NOT_FOUND',
         message: `未知路由 ${method} ${path}`,
-        available: ['GET /v1/health', 'GET /v1/provider/status', 'POST /v1/provider/ping'],
+        available: [
+          'GET /v1/health',
+          'GET /v1/provider/status',
+          'POST /v1/provider/ping',
+          'GET /v1/llm/status',
+          'POST /v1/prompt/enhance',
+        ],
       });
     } catch (err) {
       console.error(`[${requestId}] 未捕获异常`, err instanceof Error ? err.message : err);

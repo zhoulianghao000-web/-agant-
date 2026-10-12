@@ -24,6 +24,13 @@ dist-ssr/
 .env.provider.*
 !.env.provider.example
 
+# LLM 配置（提示词增强 / 技能体系的后端）—— 单独一份，**与生成能力 Provider 分开**
+# 分开的理由：两者的 Key、配额、计费口径与限流策略完全不同（见 阶段0-LLM接入-v1.md）。
+# 合并成一份会导致「换个模型就动到生成链路」这类难以排查的问题。
+.env.llm
+.env.llm.*
+!.env.llm.example
+
 # 编辑器与系统
 .vscode/*
 !.vscode/extensions.json
